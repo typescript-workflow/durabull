@@ -4,13 +4,13 @@ import { WorkflowStub, WorkflowWaitError, WorkflowContinueAsNewError } from '../
 import { getSignalMethods } from '../decorators';
 
 const isPromiseLike = <T = unknown>(value: unknown): value is PromiseLike<T> => {
-  return Boolean(value) && typeof (value as any).then === 'function';
+  return Boolean(value) && typeof (value as { then?: unknown }).then === 'function';
 };
 
 export interface ReplayResult {
-  workflow: Workflow<any, any>;
-  result?: any;
-  error?: any;
+  workflow: Workflow<unknown[], unknown>;
+  result?: unknown;
+  error?: unknown;
   status: 'completed' | 'failed' | 'running' | 'waiting' | 'continued';
   newWorkflowId?: string;
   signalCursor?: Record<string, number>;
@@ -18,10 +18,10 @@ export interface ReplayResult {
 
 export interface ReplayOptions {
   workflowId: string;
-  workflow: Workflow<any, any>;
+  workflow: Workflow<unknown[], unknown>;
   record: WorkflowRecord;
   history: { events: HistoryEvent[]; cursor: number };
-  signals: any[];
+  signals: Array<{ ts: number; name: string; payload: unknown }>;
   isResume: boolean;
   getHistory?: () => Promise<{ events: HistoryEvent[]; cursor: number }>;
   onStep?: (cursor: number, history: { events: HistoryEvent[]; cursor: number }) => Promise<void>;
@@ -77,7 +77,7 @@ export class ReplayEngine {
           const argsForSignal = Array.isArray(signal.payload)
             ? signal.payload
             : [signal.payload];
-          (workflow as any)[signal.name](...argsForSignal);
+          (workflow as unknown as Record<string, (...args: unknown[]) => void>)[signal.name](...argsForSignal);
         }
       }
       
@@ -105,8 +105,8 @@ export class ReplayEngine {
     const initialLogs = await getLogsForIndex(currentIndex);
     replaySignals(currentIndex, { initial: true, ...initialLogs });
 
-    let generator: AsyncGenerator<any, any, any>;
-    let result: IteratorResult<any, any>;
+    let generator: AsyncGenerator<unknown, unknown, unknown>;
+    let result: IteratorResult<unknown, unknown> | undefined;
 
     try {
       await WorkflowStub._run(context, async () => {
@@ -114,7 +114,16 @@ export class ReplayEngine {
         result = await generator.next();
       });
 
-      while (!result!.done) {
+      if (typeof result === 'undefined') {
+        return {
+          workflow,
+          error: new Error('Workflow did not yield a result before replay loop.'),
+          status: 'failed',
+          signalCursor: signalCursorDirty ? signalCursor : undefined
+        };
+      }
+
+      while (!result.done) {
         let { log, nextLog } = await getLogsForIndex(currentIndex);
         
         while (log && log.type === 'timer-fired') {
@@ -124,7 +133,7 @@ export class ReplayEngine {
 
         replaySignals(currentIndex, { initial: false, log, nextLog });
 
-        if (isPromiseLike(result!.value)) {
+        if (isPromiseLike(result.value)) {
           try {
             const resolved = await WorkflowStub._run(context, async () => await result!.value);
             

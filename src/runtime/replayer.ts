@@ -7,7 +7,7 @@ export { ReplayResult };
 
 export async function replayWorkflow(
   workflowId: string,
-  WorkflowClass: new () => Workflow<any, any>,
+  WorkflowClass: new () => Workflow<unknown[], unknown>,
   record?: WorkflowRecord
 ): Promise<ReplayResult> {
   const storage = getStorage();

@@ -638,14 +638,6 @@ export class WorkflowStub {
   }
 
   /**
-   * Set workflow execution context (internal use by workers)
-   * @deprecated Use _run instead
-   */
-  static _setContext(_ctx: WorkflowExecutionContext | null): void {
-    // This is now handled by AsyncLocalStorage in _run
-  }
-
-  /**
    * Get workflow execution context (internal use)
    */
   static _getContext(): WorkflowExecutionContext | null {

@@ -12,7 +12,7 @@ import { ReplayEngine } from '../runtime/ReplayEngine';
 interface WorkflowJobData {
   workflowId: string;
   workflowName?: string;
-  args?: any[];
+  args?: unknown[];
   isResume?: boolean;
   timerId?: string;
 }

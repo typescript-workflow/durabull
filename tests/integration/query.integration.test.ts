@@ -34,7 +34,9 @@ afterAll(async () => {
   }
   await new Promise((resolve) => setTimeout(resolve, 1000));
   
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
   const { closeQueues } = require('../../src/queues');
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
   const { closeStorage } = require('../../src/runtime/storage');
   await closeQueues();
   await closeStorage();
@@ -49,7 +51,8 @@ describe('Integration: Workflow Queries', () => {
       return this.count;
     }
 
-    async *execute(): AsyncGenerator<any, string, any> {
+    // eslint-disable-next-line require-yield
+    async *execute(): AsyncGenerator<unknown, string, unknown> {
       this.count = 10;
       await WorkflowStub.timer(1);
       this.count = 20;
@@ -67,11 +70,13 @@ describe('Integration: Workflow Queries', () => {
 
     await new Promise((resolve) => setTimeout(resolve, 500));
 
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const count1 = await wf.query<any>(QueryTestWorkflow).getCount();
     expect(count1).toBe(10);
 
     await new Promise((resolve) => setTimeout(resolve, 1500));
 
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const count2 = await wf.query<any>(QueryTestWorkflow).getCount();
     expect(count2).toBe(20);
     

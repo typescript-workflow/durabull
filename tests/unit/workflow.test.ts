@@ -17,7 +17,7 @@ jest.mock('../../src/runtime/logger', () => ({
 describe('Workflow', () => {
   class TestWorkflow extends Workflow<[string], string> {
     // eslint-disable-next-line require-yield
-    async *execute(input: string): AsyncGenerator<any, string, any> {
+    async *execute(input: string): AsyncGenerator<unknown, string, unknown> {
       return `Hello, ${input}!`;
     }
   }
@@ -36,7 +36,7 @@ describe('Workflow', () => {
     const compensations: string[] = [];
 
     class CompensatingWorkflow extends Workflow<[], string> {
-      async *execute(): AsyncGenerator<any, string, any> {
+      async *execute(): AsyncGenerator<unknown, string, unknown> {
         this.addCompensation(() => {
           compensations.push('comp1');
         });
@@ -65,7 +65,7 @@ describe('Workflow', () => {
     const compensations: string[] = [];
 
     class ParallelCompWorkflow extends Workflow<[], string> {
-      async *execute(): AsyncGenerator<any, string, any> {
+      async *execute(): AsyncGenerator<unknown, string, unknown> {
         this.setParallelCompensation(true);
         
         this.addCompensation(async () => {
@@ -99,7 +99,7 @@ describe('Workflow', () => {
     let errorThrown = false;
 
     class ErrorHandlingWorkflow extends Workflow<[], string> {
-      async *execute(): AsyncGenerator<any, string, any> {
+      async *execute(): AsyncGenerator<unknown, string, unknown> {
         this.setContinueWithError(true);
         
         this.addCompensation(() => {
@@ -148,7 +148,7 @@ describe('Workflow', () => {
 
   it('should support async generator iteration', async () => {
     class MultiStepWorkflow extends Workflow<[], number> {
-      async *execute(): AsyncGenerator<any, number, any> {
+      async *execute(): AsyncGenerator<unknown, number, unknown> {
         yield 1;
         yield 2;
         yield 3;
@@ -159,7 +159,7 @@ describe('Workflow', () => {
     const workflow = new MultiStepWorkflow();
     const gen = workflow.execute();
     
-    const values: any[] = [];
+    const values: unknown[] = [];
     let result = await gen.next();
     
     while (!result.done) {

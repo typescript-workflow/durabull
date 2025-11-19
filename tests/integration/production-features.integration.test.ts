@@ -43,13 +43,13 @@ beforeAll(async () => {
         },
       },
       activity: {
-        onStart: async (workflowId, activityId, activityName) => {
+        onStart: async (_workflowId, activityId, activityName) => {
           lifecycleEvents.push({ type: 'activity:start', id: activityId, name: activityName });
         },
-        onComplete: async (workflowId, activityId, activityName) => {
+        onComplete: async (_workflowId, activityId, activityName) => {
           lifecycleEvents.push({ type: 'activity:complete', id: activityId, name: activityName });
         },
-        onFailed: async (workflowId, activityId, activityName, error) => {
+        onFailed: async (_workflowId, activityId, activityName, _error) => {
           lifecycleEvents.push({ type: 'activity:failed', id: activityId, name: activityName });
         },
       },
@@ -74,7 +74,9 @@ afterAll(async () => {
   
   await new Promise((resolve) => setTimeout(resolve, 1000));
   
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
   const { closeQueues } = require('../../src/queues');
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
   const { closeStorage } = require('../../src/runtime/storage');
   await closeQueues();
   await closeStorage();
@@ -84,7 +86,7 @@ afterAll(async () => {
 
 describe('Integration: String-Based Workflow Dispatch with Workers', () => {
   class IntegrationTestWorkflow extends Workflow<[string], string> {
-    async *execute(input: string): AsyncGenerator<any, string, any> {
+    async *execute(input: string): AsyncGenerator<unknown, string, unknown> {
       const result = yield ActivityStub.make('IntegrationTestActivity', input);
       return `workflow: ${result}`;
     }
@@ -136,12 +138,12 @@ describe('Integration: String-Based Workflow Dispatch with Workers', () => {
 
 describe('Integration: Lifecycle Hooks with Workers', () => {
   class HookTestWorkflow extends Workflow<[string], string> {
-    async *execute(input: string): AsyncGenerator<any, string, any> {
+    async *execute(input: string): AsyncGenerator<unknown, string, unknown> {
       if (input === 'fail') {
         throw new Error('Intentional failure');
       }
       const result = yield ActivityStub.make('HookTestActivity', input);
-      return result;
+      return result as string;
     }
   }
 
@@ -205,11 +207,11 @@ describe('Integration: Per-Invocation Retry Overrides', () => {
   let attemptCount = 0;
 
   class RetryOverrideWorkflow extends Workflow<[number], string> {
-    async *execute(maxRetries: number): AsyncGenerator<any, string, any> {
+    async *execute(maxRetries: number): AsyncGenerator<unknown, string, unknown> {
       const result = yield ActivityStub.make('RetryOverrideActivity', maxRetries, {
         tries: maxRetries,
       });
-      return result;
+      return result as string;
     }
   }
 

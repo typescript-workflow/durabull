@@ -99,8 +99,6 @@ export function startActivityWorker(instance?: Durabull): Worker {
           } catch (hookError) {
             logger.error('Activity onStart hook failed', hookError);
           }
-        } else {
-          logger.debug(`[ActivityWorker] No onStart hook configured (has lifecycleHooks: ${!!config.lifecycleHooks}, has activity: ${!!config.lifecycleHooks?.activity})`);
         }
 
         let heartbeatInterval: NodeJS.Timeout | null = null;

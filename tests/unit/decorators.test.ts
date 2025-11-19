@@ -24,7 +24,7 @@ describe('Decorators', () => {
         return this.value;
       }
 
-      async *execute(): AsyncGenerator<any, void, any> {
+      async *execute(): AsyncGenerator<unknown, void, unknown> {
       }
     }
 
@@ -62,7 +62,7 @@ describe('Decorators', () => {
         this.value = n;
       }
 
-      async *execute(): AsyncGenerator<any, void, any> {
+      async *execute(): AsyncGenerator<unknown, void, unknown> {
       }
     }
 
@@ -91,7 +91,7 @@ describe('Decorators', () => {
       privateSignal() {
       }
 
-      async *execute(): AsyncGenerator<any, void, any> {
+      async *execute(): AsyncGenerator<unknown, void, unknown> {
       }
     }
 
@@ -114,7 +114,7 @@ describe('Decorators', () => {
         return 'running';
       }
 
-      async *execute(): AsyncGenerator<any, void, any> {
+      async *execute(): AsyncGenerator<unknown, void, unknown> {
       }
     }
 
