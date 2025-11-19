@@ -24,15 +24,14 @@ let queues: Queues | null = null;
  */
 export function initQueues(redisUrl: string, workflowQueue: string, activityQueue: string): Queues {
   if (queues) {
-    // Warn or close? Closing might be dangerous if other parts are using it.
-    // But overwriting is definitely a leak.
-    // For now, let's return existing if config matches?
-    // But we don't know if config matches easily.
-    // Let's just close the old one to be safe against leaks, assuming re-init means restart.
-    // Actually, async close in sync function is hard.
-    // Let's just throw if already initialized?
-    // Or better, make it idempotent.
-    return queues;
+    // If already initialized, check if config matches.
+    // If it does, return existing. If not, throw error to prevent leaks/confusion.
+    // Note: We can't easily check redisUrl equality due to potential formatting differences,
+    // but we can check queue names.
+    if (queues.workflow.name === workflowQueue && queues.activity.name === activityQueue) {
+      return queues;
+    }
+    throw new Error('Queues already initialized with different configuration. Call closeQueues() first.');
   }
 
   const connection = new Redis(redisUrl, {

@@ -115,6 +115,7 @@ export function startActivityWorker(instance?: Durabull): Worker {
                 // The job will eventually timeout if we stop updating heartbeat?
                 // Actually, we should probably throw if we are inside the execution?
                 // But this is async.
+                // TODO: Implement cancellation via AbortController or similar mechanism
               }
             }
           }, checkInterval);

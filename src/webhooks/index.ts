@@ -2,6 +2,8 @@ import { createHmac } from 'crypto';
 import { WorkflowStub } from '../WorkflowStub';
 import { Workflow } from '../Workflow';
 import { getWebhookMethods, getSignalMethods } from '../decorators';
+import { Durabull } from '../config/global';
+import { createLoggerFromConfig } from '../runtime/logger';
 
 type WorkflowConstructor = new () => Workflow<unknown[], unknown>;
 
@@ -158,7 +160,9 @@ export class WebhookRouter {
         },
       };
     } catch (error) {
-      console.error('Webhook start failed', error);
+      const instance = Durabull.getActive();
+      const logger = createLoggerFromConfig(instance?.getConfig().logger);
+      logger.error('Webhook start failed', error);
       return {
         statusCode: 500,
         body: { error: 'Internal Server Error' },
@@ -213,7 +217,9 @@ export class WebhookRouter {
         },
       };
     } catch (error) {
-      console.error('Webhook signal failed', error);
+      const instance = Durabull.getActive();
+      const logger = createLoggerFromConfig(instance?.getConfig().logger);
+      logger.error('Webhook signal failed', error);
       return {
         statusCode: 500,
         body: { error: 'Internal Server Error' },

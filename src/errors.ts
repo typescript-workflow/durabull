@@ -9,11 +9,13 @@ export class NonRetryableError extends Error {
 }
 
 /**
- * Error thrown when workflow needs to wait for external events
+ * Error thrown when workflow needs to wait for external events.
+ * The `message` parameter should be a descriptive explanation of why the workflow is waiting,
+ * e.g., "Timer 123 waiting 10s". If not provided, defaults to "Workflow waiting".
  */
 export class WorkflowWaitError extends Error {
-  constructor(message: string = 'Workflow waiting') {
-    super(message);
+  constructor(message?: string) {
+    super(message ?? 'Workflow waiting');
     this.name = 'WorkflowWaitError';
   }
 }
