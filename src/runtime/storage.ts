@@ -5,6 +5,7 @@
 import { Redis } from 'ioredis';
 import { WorkflowRecord, History, HistoryEvent } from './history';
 import { getSerializer } from '../serializers';
+import { Durabull } from '../config/global';
 
 /**
  * Signal envelope
@@ -217,8 +218,6 @@ let storageInstance: Storage | null = null;
  */
 export function getStorage(): Storage {
   if (!storageInstance) {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-const { Durabull } = require('../config/global');
     const instance = Durabull.getActive();
     const redisUrl = instance?.getConfig().redisUrl || 'redis://localhost:6379';
     const serializer = instance?.getConfig().serializer || 'json';

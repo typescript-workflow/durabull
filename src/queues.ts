@@ -4,6 +4,7 @@
 
 import { Queue, QueueEvents } from 'bullmq';
 import { Redis } from 'ioredis';
+import { Durabull } from './config/global';
 
 /**
  * Queue instances
@@ -42,9 +43,6 @@ export function initQueues(redisUrl: string, workflowQueue: string, activityQueu
  */
 export function getQueues(): Queues {
   if (!queues) {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-const { Durabull } = require('./config/global');
-
     const instance = Durabull.getActive();
     
     if (instance) {

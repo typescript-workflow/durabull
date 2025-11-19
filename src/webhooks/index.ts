@@ -186,7 +186,7 @@ export class WebhookRouter {
       }
 
       const webhookMethods = getWebhookMethods(WorkflowClass);
-      if (webhookMethods.length > 0 && !webhookMethods.includes(signalName)) {
+      if (webhookMethods.length === 0 || !webhookMethods.includes(signalName)) {
         return {
           statusCode: 403,
           body: { error: `Signal ${signalName} not exposed via webhook` },

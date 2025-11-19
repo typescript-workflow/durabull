@@ -54,11 +54,14 @@ export class ActivityStub {
     let options: ActivityOptions | undefined;
     let args: ActivityArgs<T>;
     
-    // Check if the last argument is an options object
-    // We check for specific keys to distinguish it from a regular argument
-    // This is a heuristic and could be improved with a dedicated options parameter in a future major version
-    if (lastArg && typeof lastArg === 'object' && !Array.isArray(lastArg) && 
-        ('tries' in lastArg || 'timeout' in lastArg || 'backoff' in lastArg || 'activityId' in lastArg)) {
+    const knownOptionKeys = ['tries', 'timeout', 'backoff', 'activityId'];
+    const isOptionsObject = lastArg && 
+      typeof lastArg === 'object' && 
+      !Array.isArray(lastArg) && 
+      Object.keys(lastArg).some(k => knownOptionKeys.includes(k)) &&
+      Object.keys(lastArg).every(k => knownOptionKeys.includes(k));
+
+    if (isOptionsObject) {
       options = lastArg as ActivityOptions;
       args = argsWithOptions.slice(0, -1) as ActivityArgs<T>;
     } else {
