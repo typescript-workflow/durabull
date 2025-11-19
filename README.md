@@ -44,6 +44,7 @@ const durabull = new Durabull({
   serializer: 'json',
   pruneAge: '30 days',
   // Optional: Queue routing for multi-tenant support
+  // The context object is passed from WorkflowStub.make(WorkflowClass, { context: { ... } })
   queueRouter: (workflowName, context) => {
     const tenant = context?.tenantId;
     return tenant ? {

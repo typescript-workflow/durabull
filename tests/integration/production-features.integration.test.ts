@@ -217,7 +217,9 @@ describe('Integration: Per-Invocation Retry Overrides', () => {
   class RetryOverrideWorkflow extends Workflow<[number], string> {
     async *execute(maxRetries: number): AsyncGenerator<unknown, string, unknown> {
       const result = yield ActivityStub.make('RetryOverrideActivity', maxRetries, {
-        tries: maxRetries,
+        __options: {
+          tries: maxRetries,
+        }
       });
       return result as string;
     }

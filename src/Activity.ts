@@ -92,7 +92,10 @@ export abstract class Activity<TArgs extends unknown[] = unknown[], TResult = un
     throw lastError || new Error('Activity execution failed');
   }
 
-  async _executeWithTimeout(timeoutMs: number, ...args: TArgs): Promise<TResult> {
+  /**
+   * @internal This method is for internal use only and not part of the public API.
+   */
+  public async _executeWithTimeout(timeoutMs: number, ...args: TArgs): Promise<TResult> {
     return await new Promise<TResult>((resolve, reject) => {
       const timer = setTimeout(() => {
         clearTimeout(timer);

@@ -238,7 +238,16 @@ export function startActivityWorker(instance?: Durabull): Worker {
       connection,
       settings: {
         // Backoff settings for retries
-        backoffStrategy: (attemptsMade: number) => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        backoffStrategy: (attemptsMade: number, _type?: string, _err?: Error, job?: any) => {
+          const activityJob = job as Job<ActivityJobData>;
+          if (activityJob?.data?.retryOptions?.backoff) {
+            const backoff = activityJob.data.retryOptions.backoff;
+            // attemptsMade is 1-based. For first retry (attemptsMade=1), use index 0.
+            const index = Math.max(0, Math.min(attemptsMade - 1, backoff.length - 1));
+            return backoff[index] * 1000;
+          }
+
           const backoffSchedule = [1, 2, 5, 10, 30, 60, 120];
           const index = Math.min(attemptsMade, backoffSchedule.length - 1);
           return backoffSchedule[index] * 1000;

@@ -54,15 +54,15 @@ export class ActivityStub {
     let options: ActivityOptions | undefined;
     let args: ActivityArgs<T>;
     
-    const knownOptionKeys = ['tries', 'timeout', 'backoff', 'activityId'];
-    const isOptionsObject = lastArg && 
-      typeof lastArg === 'object' && 
-      !Array.isArray(lastArg) && 
-      Object.keys(lastArg).some(k => knownOptionKeys.includes(k)) &&
-      Object.keys(lastArg).every(k => knownOptionKeys.includes(k));
+    // Check for explicit options wrapper
+    const isWrappedOptions = lastArg &&
+      typeof lastArg === 'object' &&
+      !Array.isArray(lastArg) &&
+      lastArg !== null &&
+      Object.prototype.hasOwnProperty.call(lastArg, '__options');
 
-    if (isOptionsObject) {
-      options = lastArg as ActivityOptions;
+    if (isWrappedOptions) {
+      options = (lastArg as { __options: ActivityOptions }).__options;
       args = argsWithOptions.slice(0, -1) as ActivityArgs<T>;
     } else {
       args = argsWithOptions as ActivityArgs<T>;
