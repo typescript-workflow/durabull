@@ -201,6 +201,9 @@ export function startActivityWorker(instance?: Durabull): Worker {
           const maxAttempts = job.opts.attempts || 1;
           // attemptsMade is incremented before processing. So if attempts=3, attemptsMade=1 (first try).
           // If attemptsMade >= maxAttempts, this is the last try.
+          // Note: BullMQ attemptsMade is 1-based (1 for first attempt).
+          // So if maxAttempts=3, attemptsMade will be 1, 2, 3.
+          // When attemptsMade=3, it is the last attempt.
           
           if (job.attemptsMade >= maxAttempts) {
             logger.error(`[ActivityWorker] Activity ${activityId} failed after all retries`, error);

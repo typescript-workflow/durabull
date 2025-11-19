@@ -139,6 +139,9 @@ export class WebhookRouter {
 
       const webhookMethods = getWebhookMethods(WorkflowClass);
       if (webhookMethods.length === 0 || !webhookMethods.includes('execute')) {
+        const instance = Durabull.getActive();
+        const logger = createLoggerFromConfig(instance?.getConfig().logger);
+        logger.warn(`Workflow ${workflowName} start not exposed via webhook. Available methods: ${webhookMethods.join(', ')}`);
         return {
           statusCode: 403,
           body: { error: 'Workflow start not exposed via webhook' },

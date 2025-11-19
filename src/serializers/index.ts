@@ -16,16 +16,17 @@ export interface Serializer {
 export class JsonSerializer implements Serializer {
   serialize<T>(data: T): string {
     if (data === undefined) {
-      return 'undefined';
+      return JSON.stringify({ __type: 'undefined' });
     }
     return JSON.stringify(data);
   }
 
   deserialize<T>(str: string): T {
-    if (str === 'undefined') {
+    const parsed = JSON.parse(str);
+    if (parsed && typeof parsed === 'object' && parsed.__type === 'undefined') {
       return undefined as T;
     }
-    return JSON.parse(str) as T;
+    return parsed as T;
   }
 }
 
