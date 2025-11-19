@@ -90,10 +90,32 @@ export class RedisStorage implements Storage {
 
     // Check if list exists
     const exists = await this.redis.exists(eventsKey);
+    const data = hist.events.map(e => this.serializer.serialize(e));
+
     if (!exists) {
-      const data = hist.events.map(e => this.serializer.serialize(e));
       if (data.length > 0) {
         await this.redis.rpush(eventsKey, ...data);
+      }
+    } else {
+      // Validate stored events match provided events
+      const storedEvents = await this.redis.lrange(eventsKey, 0, -1);
+      let mismatch = false;
+      if (storedEvents.length !== data.length) {
+        mismatch = true;
+      } else {
+        for (let i = 0; i < data.length; i++) {
+          if (storedEvents[i] !== data[i]) {
+            mismatch = true;
+            break;
+          }
+        }
+      }
+      if (mismatch) {
+        // Replace the stored events with the new events
+        await this.redis.del(eventsKey);
+        if (data.length > 0) {
+          await this.redis.rpush(eventsKey, ...data);
+        }
       }
     }
   }

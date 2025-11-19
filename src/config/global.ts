@@ -35,6 +35,7 @@ export interface DurabullGlobalConfig {
       method: 'none' | 'token' | 'signature' | 'custom';
       header?: string;
       token?: string;
+      secret?: string;
     };
   };
   logger?: DurabullLogger;

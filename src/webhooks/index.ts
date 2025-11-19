@@ -165,10 +165,11 @@ export class WebhookRouter {
     } catch (error) {
       const instance = Durabull.getActive();
       const logger = createLoggerFromConfig(instance?.getConfig().logger);
-      logger.error('Webhook start failed', error);
+      const requestId = Math.random().toString(36).substring(7);
+      logger.error(`Webhook start failed (req=${requestId})`, error);
       return {
         statusCode: 500,
-        body: { error: 'Internal Server Error' },
+        body: { error: 'Internal Server Error', requestId },
       };
     }
   }
@@ -222,15 +223,31 @@ export class WebhookRouter {
     } catch (error) {
       const instance = Durabull.getActive();
       const logger = createLoggerFromConfig(instance?.getConfig().logger);
-      logger.error('Webhook signal failed', error);
+      const requestId = Math.random().toString(36).substring(7);
+      logger.error(`Webhook signal failed (req=${requestId})`, error);
       return {
         statusCode: 500,
-        body: { error: 'Internal Server Error' },
+        body: { error: 'Internal Server Error', requestId },
       };
     }
   }
 }
 
 export function createWebhookRouter(config?: WebhookRouterConfig): WebhookRouter {
+  // Auto-configure authStrategy from Durabull config if not provided
+  if (!config?.authStrategy) {
+    const instance = Durabull.getActive();
+    const durabullConfig = instance?.getConfig();
+    let authStrategy: AuthStrategy = new NoneAuthStrategy();
+    if (durabullConfig?.webhooks?.auth) {
+      const authConfig = durabullConfig.webhooks.auth;
+      if (authConfig.method === 'token' && authConfig.token) {
+        authStrategy = new TokenAuthStrategy(authConfig.token, authConfig.header);
+      } else if (authConfig.method === 'signature' && authConfig.secret) {
+        authStrategy = new SignatureAuthStrategy(authConfig.secret, authConfig.header);
+      }
+    }
+    config = { ...config, authStrategy };
+  }
   return new WebhookRouter(config);
 }
