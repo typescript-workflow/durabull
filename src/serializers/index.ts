@@ -15,10 +15,16 @@ export interface Serializer {
  */
 export class JsonSerializer implements Serializer {
   serialize<T>(data: T): string {
+    if (data === undefined) {
+      return 'undefined';
+    }
     return JSON.stringify(data);
   }
 
   deserialize<T>(str: string): T {
+    if (str === 'undefined') {
+      return undefined as T;
+    }
     return JSON.parse(str) as T;
   }
 }

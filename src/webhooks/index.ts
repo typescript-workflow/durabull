@@ -1,14 +1,7 @@
-/**
- * Webhook HTTP router for workflow control
- * 
- * Provides REST API endpoints for starting workflows and sending signals
- * with configurable authentication strategies
- */
-
 import { createHmac } from 'crypto';
-import { Durabull } from '../config/global';
 import { WorkflowStub } from '../WorkflowStub';
 import { Workflow } from '../Workflow';
+import { getWebhookMethods, getSignalMethods } from '../decorators';
 
 type WorkflowConstructor = new () => Workflow<unknown[], unknown>;
 
@@ -16,16 +9,10 @@ const isRecord = (value: unknown): value is Record<string, unknown> => {
   return typeof value === 'object' && value !== null;
 };
 
-/**
- * Auth strategy interface
- */
 export interface AuthStrategy {
   authenticate(request: WebhookRequest): Promise<boolean>;
 }
 
-/**
- * Simple request interface (framework-agnostic)
- */
 export interface WebhookRequest {
   method: string;
   path: string;
@@ -33,27 +20,18 @@ export interface WebhookRequest {
   body: unknown;
 }
 
-/**
- * Simple response interface (framework-agnostic)
- */
 export interface WebhookResponse {
   statusCode: number;
   body: unknown;
   headers?: Record<string, string>;
 }
 
-/**
- * No authentication - all requests allowed
- */
 export class NoneAuthStrategy implements AuthStrategy {
   async authenticate(_request: WebhookRequest): Promise<boolean> {
     return true;
   }
 }
 
-/**
- * Token-based authentication
- */
 export class TokenAuthStrategy implements AuthStrategy {
   private token: string;
   private header: string;
@@ -68,7 +46,6 @@ export class TokenAuthStrategy implements AuthStrategy {
     
     if (!headerValue) return false;
     
-    // Support "Bearer <token>" format
     if (headerValue.startsWith('Bearer ')) {
       return headerValue.substring(7) === this.token;
     }
@@ -77,9 +54,6 @@ export class TokenAuthStrategy implements AuthStrategy {
   }
 }
 
-/**
- * Signature-based authentication (HMAC)
- */
 export class SignatureAuthStrategy implements AuthStrategy {
   private secret: string;
   private header: string;
@@ -94,7 +68,6 @@ export class SignatureAuthStrategy implements AuthStrategy {
     
     if (!signature) return false;
     
-    // Compute HMAC signature of request body
     const bodyStr = typeof request.body === 'string' ? request.body : JSON.stringify(request.body);
     const expectedSignature = createHmac('sha256', this.secret)
       .update(bodyStr)
@@ -104,29 +77,17 @@ export class SignatureAuthStrategy implements AuthStrategy {
   }
 }
 
-/**
- * Webhook router configuration
- */
 export interface WebhookRouterConfig {
   authStrategy?: AuthStrategy;
   workflowRegistry?: Map<string, WorkflowConstructor>;
 }
 
-/**
- * Workflow registry for webhook routing
- */
 const workflowRegistry = new Map<string, WorkflowConstructor>();
 
-/**
- * Register a workflow class for webhook access
- */
 export function registerWebhookWorkflow(name: string, WorkflowClass: WorkflowConstructor): void {
   workflowRegistry.set(name, WorkflowClass);
 }
 
-/**
- * Simple webhook router
- */
 export class WebhookRouter {
   private authStrategy: AuthStrategy;
   private registry: Map<string, WorkflowConstructor>;
@@ -136,11 +97,7 @@ export class WebhookRouter {
     this.registry = config.workflowRegistry || workflowRegistry;
   }
 
-  /**
-   * Handle webhook request
-   */
   async handle(request: WebhookRequest): Promise<WebhookResponse> {
-    // Authenticate
     const isAuthenticated = await this.authStrategy.authenticate(request);
     if (!isAuthenticated) {
       return {
@@ -149,15 +106,12 @@ export class WebhookRouter {
       };
     }
 
-    // Route based on path
     const pathParts = request.path.split('/').filter(p => p);
     
-    // POST /start/:workflow
     if (request.method === 'POST' && pathParts[0] === 'start' && pathParts.length === 2) {
       return await this.handleStart(pathParts[1], request.body);
     }
     
-    // POST /signal/:workflow/:id/:signal
     if (request.method === 'POST' && pathParts[0] === 'signal' && pathParts.length === 4) {
       return await this.handleSignal(pathParts[1], pathParts[2], pathParts[3], request.body);
     }
@@ -168,9 +122,6 @@ export class WebhookRouter {
     };
   }
 
-  /**
-   * Handle workflow start
-   */
   private async handleStart(workflowName: string, body: unknown): Promise<WebhookResponse> {
     try {
       const WorkflowClass = this.registry.get(workflowName);
@@ -181,11 +132,19 @@ export class WebhookRouter {
         };
       }
 
+      const webhookMethods = getWebhookMethods(WorkflowClass);
+      if (webhookMethods.length > 0 && !webhookMethods.includes('execute')) {
+        return {
+          statusCode: 403,
+          body: { error: 'Workflow start not exposed via webhook' },
+        };
+      }
+
   const payload = isRecord(body) ? body : {};
   const args: unknown[] = Array.isArray(payload.args) ? payload.args : [];
       const id = typeof payload.id === 'string' ? payload.id : undefined;
       
-      const handle = await WorkflowStub.make(WorkflowClass, id);
+      const handle = await WorkflowStub.make(WorkflowClass, id ? { id } : undefined);
       await handle.start(...args);
       
       return {
@@ -203,16 +162,37 @@ export class WebhookRouter {
     }
   }
 
-  /**
-   * Handle signal send
-   */
   private async handleSignal(
-    _workflowName: string, 
+    workflowName: string, 
     workflowId: string, 
     signalName: string, 
     body: unknown
   ): Promise<WebhookResponse> {
     try {
+      const WorkflowClass = this.registry.get(workflowName);
+      if (!WorkflowClass) {
+        return {
+          statusCode: 404,
+          body: { error: `Workflow ${workflowName} not found` },
+        };
+      }
+
+      const signalMethods = getSignalMethods(WorkflowClass);
+      if (!signalMethods.includes(signalName)) {
+        return {
+          statusCode: 404,
+          body: { error: `Signal ${signalName} not found on workflow ${workflowName}` },
+        };
+      }
+
+      const webhookMethods = getWebhookMethods(WorkflowClass);
+      if (webhookMethods.length > 0 && !webhookMethods.includes(signalName)) {
+        return {
+          statusCode: 403,
+          body: { error: `Signal ${signalName} not exposed via webhook` },
+        };
+      }
+
       const rawPayload = isRecord(body) ? body.payload : undefined;
       const payload: unknown[] = Array.isArray(rawPayload)
         ? rawPayload
@@ -237,34 +217,8 @@ export class WebhookRouter {
   }
 }
 
-/**
- * Create webhook router with configured auth strategy
- */
 export function createWebhookRouter(config?: WebhookRouterConfig): WebhookRouter {
-  const durabullConfig = Durabull.isConfigured() ? Durabull.getConfig() : null;
-  
-  let authStrategy: AuthStrategy;
-  
-  if (config?.authStrategy) {
-    authStrategy = config.authStrategy;
-  } else if (durabullConfig?.webhooks?.auth) {
-    const auth = durabullConfig.webhooks.auth;
-    
-    switch (auth.method) {
-      case 'token':
-        authStrategy = new TokenAuthStrategy(auth.token!, auth.header);
-        break;
-      case 'signature':
-        authStrategy = new SignatureAuthStrategy(auth.token!, auth.header);
-        break;
-      case 'custom':
-        throw new Error('Custom auth strategy must be provided in config');
-      default:
-        authStrategy = new NoneAuthStrategy();
-    }
-  } else {
-    authStrategy = new NoneAuthStrategy();
-  }
+  const authStrategy = config?.authStrategy || new NoneAuthStrategy();
   
   return new WebhookRouter({
     authStrategy,

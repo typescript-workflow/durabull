@@ -5,7 +5,6 @@
 import { Redis } from 'ioredis';
 import { WorkflowRecord, History, HistoryEvent } from './history';
 import { getSerializer } from '../serializers';
-import { Durabull } from '../config/global';
 
 /**
  * Signal envelope
@@ -41,11 +40,14 @@ export interface Storage {
  */
 export class RedisStorage implements Storage {
   private redis: Redis;
-  private serializer = getSerializer(Durabull.isConfigured() ? Durabull.getConfig().serializer : 'json');
+  private serializer = getSerializer('json');
 
-  constructor(redisUrl?: string) {
-    const url = redisUrl || (Durabull.isConfigured() ? Durabull.getConfig().redisUrl : 'redis://localhost:6379');
+  constructor(redisUrl?: string, serializerType?: 'json' | 'base64') {
+    const url = redisUrl || 'redis://localhost:6379';
     this.redis = new Redis(url);
+    if (serializerType) {
+      this.serializer = getSerializer(serializerType);
+    }
   }
 
   /**
@@ -90,7 +92,6 @@ export class RedisStorage implements Storage {
    * Append event to history (optimized)
    */
   async appendEvent(id: string, ev: HistoryEvent): Promise<void> {
-    // Read, append, write pattern (could use Lua script for atomicity)
     const hist = await this.readHistory(id) || { events: [], cursor: 0 };
     hist.events.push(ev);
     await this.writeHistory(id, hist);
@@ -181,7 +182,6 @@ export class RedisStorage implements Storage {
     await this.redis.quit();
   }
 
-  // Key builders
   private getRecordKey(id: string): string {
     return `durabull:wf:${id}:record`;
   }
@@ -217,7 +217,12 @@ let storageInstance: Storage | null = null;
  */
 export function getStorage(): Storage {
   if (!storageInstance) {
-    storageInstance = new RedisStorage();
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+const { Durabull } = require('../config/global');
+    const instance = Durabull.getActive();
+    const redisUrl = instance?.getConfig().redisUrl || 'redis://localhost:6379';
+    const serializer = instance?.getConfig().serializer || 'json';
+    storageInstance = new RedisStorage(redisUrl, serializer);
   }
   return storageInstance;
 }
@@ -227,4 +232,14 @@ export function getStorage(): Storage {
  */
 export function setStorage(storage: Storage): void {
   storageInstance = storage;
+}
+
+/**
+ * Close storage connection
+ */
+export async function closeStorage(): Promise<void> {
+  if (storageInstance && storageInstance instanceof RedisStorage) {
+    await storageInstance.close();
+    storageInstance = null;
+  }
 }

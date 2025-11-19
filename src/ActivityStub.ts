@@ -2,12 +2,25 @@
  * ActivityStub - interface for executing activities from workflows
  */
 
-import { Activity, ActivityContext } from './Activity';
+import { Activity } from './Activity';
+import { getQueues } from './queues';
+import { getStorage } from './runtime/storage';
+import { WorkflowStub, WorkflowWaitError } from './WorkflowStub';
 
 type AnyActivity = Activity<unknown[], unknown>;
 type ActivityConstructor<T extends AnyActivity = AnyActivity> = new () => T;
 type ActivityArgs<T extends AnyActivity> = Parameters<T['execute']>;
 type ActivityResult<T extends AnyActivity> = Awaited<ReturnType<T['execute']>>;
+
+/**
+ * Options for activity execution with per-invocation overrides
+ */
+export interface ActivityOptions {
+  tries?: number;
+  timeout?: number;
+  backoff?: number[];
+  activityId?: string;
+}
 
 const isPromiseLike = (value: unknown): value is PromiseLike<unknown> => {
   return typeof value === 'object' && value !== null && 'then' in value &&
@@ -30,25 +43,80 @@ export class ActivityPromise<T = unknown> implements PromiseLike<T> {
 
 export class ActivityStub {
   /**
-   * Execute an activity immediately (test-mode friendly)
+   * Execute an activity - queues to BullMQ in durable mode, executes inline in test mode
    */
   static make<T extends AnyActivity>(
-    ActivityClass: ActivityConstructor<T>,
-    ...args: ActivityArgs<T>
+    activityClassOrName: ActivityConstructor<T> | string,
+    ...argsWithOptions: [...args: ActivityArgs<T>, options?: ActivityOptions] | ActivityArgs<T>
   ): ActivityPromise<ActivityResult<T>> {
-    const activity = new ActivityClass();
+    // Parse args and options
+    const lastArg = argsWithOptions[argsWithOptions.length - 1];
+    let options: ActivityOptions | undefined;
+    let args: ActivityArgs<T>;
+    
+    if (lastArg && typeof lastArg === 'object' && !Array.isArray(lastArg) && 
+        ('tries' in lastArg || 'timeout' in lastArg || 'backoff' in lastArg || 'activityId' in lastArg)) {
+      options = lastArg as ActivityOptions;
+      args = argsWithOptions.slice(0, -1) as ActivityArgs<T>;
+    } else {
+      args = argsWithOptions as ActivityArgs<T>;
+    }
 
-    const context: ActivityContext = {
-      workflowId: 'wf-' + Math.random().toString(36).substring(7),
-      activityId: 'act-' + Math.random().toString(36).substring(7),
-      attempt: 0,
-      heartbeat: () => undefined,
-    };
+    let activityName: string;
 
-    activity._setContext(context);
+    if (typeof activityClassOrName === 'string') {
+      activityName = activityClassOrName;
+    } else {
+      activityName = activityClassOrName.name;
+    }
 
-    const promise = activity._executeWithRetry(...args) as Promise<ActivityResult<T>>;
-    return new ActivityPromise<ActivityResult<T>>(promise);
+    // Queue activity and return promise that will be resolved by workflow worker via history replay
+    const promise = (async () => {
+      const workflowContext = WorkflowStub._getContext();
+      if (!workflowContext) {
+        throw new Error('ActivityStub must be called within a workflow context');
+      }
+
+      const queues = getQueues();
+      const storage = getStorage();
+      const activityId = options?.activityId || WorkflowStub._generateActivityId();
+      const workflowId = workflowContext.workflowId;
+      const history = await storage.readHistory(workflowId);
+
+      // Check if this activity already completed (replay)
+      if (history) {
+        const existingEvent = history.events.find(
+          (e) => e.type === 'activity' && e.id === activityId
+        );
+        
+        if (existingEvent && existingEvent.type === 'activity') {
+          if (existingEvent.error) {
+            throw new Error(existingEvent.error.message || 'Activity failed');
+          }
+          return existingEvent.result as ActivityResult<T>;
+        }
+      }
+
+      // Build retry options from activity metadata and per-invocation overrides
+      const retryOptions: { tries?: number; timeout?: number; backoff?: number[] } = {};
+      if (options?.tries !== undefined) retryOptions.tries = options.tries;
+      if (options?.timeout !== undefined) retryOptions.timeout = options.timeout;
+      if (options?.backoff) retryOptions.backoff = options.backoff;
+
+      // Queue the activity job (only on first execution, not replay)
+      await queues.activity.add('execute', {
+        workflowId,
+        activityClass: activityName,
+        activityId,
+        args,
+        retryOptions: Object.keys(retryOptions).length > 0 ? retryOptions : undefined,
+      });
+
+      // Throw WorkflowWaitError to suspend execution - worker will resume when activity completes
+      throw new WorkflowWaitError(`Waiting for activity ${activityId}`);
+    })();
+
+    return new ActivityPromise<ActivityResult<T>>(promise as Promise<ActivityResult<T>>);
   }
 
   /**

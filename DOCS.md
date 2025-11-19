@@ -401,7 +401,6 @@ Activities must be idempotent:
 
 ## Additional Resources
 
-- [`CHEATSHEET.md`](./CHEATSHEET.md) – Condensed API reference and examples
 - [`examples/`](./examples) – Executable end-to-end samples (greeting, parallelism, signals/queries, saga, timers, heartbeats)
 - `tests/` – Comprehensive Jest coverage mirroring Laravel Workflow fixtures
 

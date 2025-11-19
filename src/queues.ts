@@ -3,7 +3,6 @@
  */
 
 import { Queue, QueueEvents } from 'bullmq';
-import { Durabull } from './config/global';
 import { Redis } from 'ioredis';
 
 /**
@@ -14,26 +13,50 @@ interface Queues {
   activity: Queue;
   workflowEvents: QueueEvents;
   activityEvents: QueueEvents;
+  connection: Redis;
 }
 
 let queues: Queues | null = null;
 
 /**
- * Get or create queue instances
+ * Initialize queues with explicit configuration
+ */
+export function initQueues(redisUrl: string, workflowQueue: string, activityQueue: string): Queues {
+  const connection = new Redis(redisUrl, {
+    maxRetriesPerRequest: null,
+  });
+
+  queues = {
+    workflow: new Queue(workflowQueue, { connection: connection.duplicate() }),
+    activity: new Queue(activityQueue, { connection: connection.duplicate() }),
+    workflowEvents: new QueueEvents(workflowQueue, { connection: connection.duplicate() }),
+    activityEvents: new QueueEvents(activityQueue, { connection: connection.duplicate() }),
+    connection,
+  };
+  
+  return queues;
+}
+
+/**
+ * Get queue instances (must call initQueues first in durable mode)
  */
 export function getQueues(): Queues {
   if (!queues) {
-    const config = Durabull.getConfig();
-    const connection = new Redis(config.redisUrl, {
-      maxRetriesPerRequest: null,
-    });
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+const { Durabull } = require('./config/global');
 
-    queues = {
-      workflow: new Queue(config.queues!.workflow!, { connection: connection.duplicate() }),
-      activity: new Queue(config.queues!.activity!, { connection: connection.duplicate() }),
-      workflowEvents: new QueueEvents(config.queues!.workflow!, { connection: connection.duplicate() }),
-      activityEvents: new QueueEvents(config.queues!.activity!, { connection: connection.duplicate() }),
-    };
+    const instance = Durabull.getActive();
+    
+    if (instance) {
+      const config = instance.getConfig();
+      return initQueues(
+        config.redisUrl,
+        config.queues!.workflow!,
+        config.queues!.activity!
+      );
+    }
+    
+    return initQueues('redis://localhost:6379', 'durabull:workflow', 'durabull:activity');
   }
   return queues;
 }
@@ -47,6 +70,7 @@ export async function closeQueues(): Promise<void> {
     await queues.activity.close();
     await queues.workflowEvents.close();
     await queues.activityEvents.close();
+    await queues.connection.quit();
     queues = null;
   }
 }

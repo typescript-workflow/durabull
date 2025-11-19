@@ -1,36 +1,11 @@
-/**
- * Activity worker implementation
- * 
- * Logs are routed through the configurable Durabull logger hook for observability.
- */
-
 import { Worker, Job } from 'bullmq';
 import { Durabull } from '../config/global';
 import { getStorage } from '../runtime/storage';
-import { getQueues } from '../queues';
+import { initQueues, getQueues } from '../queues';
 import { NonRetryableError } from '../errors';
 import { Redis } from 'ioredis';
-import { Activity, ActivityContext } from '../Activity';
-import { getLogger } from '../runtime/logger';
-
-/**
- * Activity registry - maps class names to constructors
- */
-const activityRegistry = new Map<string, new () => Activity>();
-
-/**
- * Register an activity class
- */
-export function registerActivity(name: string, ActivityClass: new () => Activity): void {
-  activityRegistry.set(name, ActivityClass);
-}
-
-/**
- * Resolve activity class by name
- */
-export function resolveActivity(name: string): (new () => Activity) | null {
-  return activityRegistry.get(name) || null;
-}
+import { ActivityContext } from '../Activity';
+import { createLoggerFromConfig } from '../runtime/logger';
 
 /**
  * Job data for activity execution
@@ -40,29 +15,43 @@ interface ActivityJobData {
   activityClass: string;
   activityId: string;
   args: unknown[];
+  retryOptions?: {
+    tries?: number;
+    timeout?: number;
+    backoff?: number[];
+  };
 }
 
 /**
  * Start the activity worker
  */
-export function startActivityWorker(): Worker {
-  const config = Durabull.getConfig();
+export function startActivityWorker(instance?: Durabull): Worker {
+  const durabullInstance = instance || (Durabull as any);
+  const initialConfig = durabullInstance.getConfig();
   const storage = getStorage();
-  const queues = getQueues();
-  const logger = getLogger();
   
-  const connection = new Redis(config.redisUrl, {
+  // Initialize queues if not already initialized
+  initQueues(
+    initialConfig.redisUrl,
+    initialConfig.queues!.workflow!,
+    initialConfig.queues!.activity!
+  );
+  
+  const queues = getQueues();
+  const logger = createLoggerFromConfig(initialConfig.logger);
+  
+  const connection = new Redis(initialConfig.redisUrl, {
     maxRetriesPerRequest: null,
   });
 
   const worker = new Worker(
-    config.queues!.activity!,
+    initialConfig.queues!.activity!,
     async (job: Job<ActivityJobData>) => {
-      const { workflowId, activityClass, activityId, args } = job.data;
+      const config = durabullInstance.getConfig();
+      const { workflowId, activityClass, activityId, args, retryOptions } = job.data;
 
-  logger.info(`[ActivityWorker] Processing activity ${activityId} for workflow ${workflowId}`);
+  logger.info(`[ActivityWorker] Processing activity ${activityId} (${activityClass}) for workflow ${workflowId}`);
 
-      // Acquire lock to prevent concurrent execution
       const lockAcquired = await storage.acquireLock(workflowId, `activity:${activityId}`, 300);
       if (!lockAcquired) {
         logger.debug(`[ActivityWorker] Activity ${activityId} is already running, skipping`);
@@ -70,22 +59,30 @@ export function startActivityWorker(): Worker {
       }
 
       try {
-    // Resolve activity class
-    const ActivityClass = resolveActivity(activityClass);
+        const ActivityClass = durabullInstance.resolveActivity(activityClass);
         if (!ActivityClass) {
-          throw new Error(`Activity class ${activityClass} not registered`);
+          throw new Error(`Activity "${activityClass}" not registered`);
         }
 
-    // Instantiate activity
     const activity = new ActivityClass();
+    
+    if (retryOptions) {
+      if (retryOptions.tries !== undefined) {
+        activity.tries = retryOptions.tries;
+      }
+      if (retryOptions.timeout !== undefined) {
+        activity.timeout = retryOptions.timeout;
+      }
+      if (retryOptions.backoff) {
+        activity.backoff = () => retryOptions.backoff!;
+      }
+    }
 
-    // Create context
     const context: ActivityContext = {
           workflowId,
           activityId,
           attempt: job.attemptsMade,
           heartbeat: async () => {
-            // Refresh heartbeat in Redis
             const timeout = activity.timeout || 300; // Default 5 minutes
             await storage.refreshHeartbeat(workflowId, activityId, timeout);
           },
@@ -93,7 +90,16 @@ export function startActivityWorker(): Worker {
 
         activity._setContext(context);
 
-        // Setup heartbeat monitoring if timeout is set
+        if (config.lifecycleHooks?.activity?.onStart) {
+          try {
+            await config.lifecycleHooks.activity.onStart(workflowId, activityId, activityClass, args);
+          } catch (hookError) {
+            logger.error('Activity onStart hook failed', hookError);
+          }
+        } else {
+          logger.debug(`[ActivityWorker] No onStart hook configured (has lifecycleHooks: ${!!config.lifecycleHooks}, has activity: ${!!config.lifecycleHooks?.activity})`);
+        }
+
         let heartbeatInterval: NodeJS.Timeout | null = null;
         if (activity.timeout && activity.timeout > 0) {
           const checkInterval = Math.max(activity.timeout * 1000 / 2, 1000); // Check at half the timeout
@@ -109,20 +115,16 @@ export function startActivityWorker(): Worker {
             }
           }, checkInterval);
           
-          // Initial heartbeat
           await context.heartbeat();
         }
 
         try {
-          // Execute activity with retry logic
           const result = await activity._executeWithRetry(...args);
 
-          // Clear heartbeat monitoring
           if (heartbeatInterval) {
             clearInterval(heartbeatInterval);
           }
 
-          // Append success event to history
           await storage.appendEvent(workflowId, {
             type: 'activity',
             id: activityId,
@@ -130,25 +132,29 @@ export function startActivityWorker(): Worker {
             result,
           });
 
-          // Enqueue workflow resume job
           await queues.workflow.add('resume', {
             workflowId,
             isResume: true,
           });
 
+          if (config.lifecycleHooks?.activity?.onComplete) {
+            try {
+              await config.lifecycleHooks.activity.onComplete(workflowId, activityId, activityClass, result);
+            } catch (hookError) {
+              logger.error('Activity onComplete hook failed', hookError);
+            }
+          }
+
           logger.info(`[ActivityWorker] Activity ${activityId} completed`);
           return result;
         } catch (error) {
-          // Clear heartbeat monitoring
           if (heartbeatInterval) {
             clearInterval(heartbeatInterval);
           }
 
-          // Check if error is non-retryable
           if (error instanceof NonRetryableError) {
             logger.error(`[ActivityWorker] Activity ${activityId} failed with non-retryable error`, error);
             
-            // Append error event to history
             await storage.appendEvent(workflowId, {
               type: 'activity',
               id: activityId,
@@ -160,22 +166,26 @@ export function startActivityWorker(): Worker {
               },
             });
 
-            // Enqueue workflow resume job
             await queues.workflow.add('resume', {
               workflowId,
               isResume: true,
             });
 
-            throw error; // Don't retry
+            if (config.lifecycleHooks?.activity?.onFailed) {
+              try {
+                await config.lifecycleHooks.activity.onFailed(workflowId, activityId, activityClass, error);
+              } catch (hookError) {
+                logger.error('Activity onFailed hook failed', hookError);
+              }
+            }
+
+            throw error;
           }
 
-          // For retryable errors, let BullMQ handle retries
           const maxAttempts = activity.tries === 0 ? 1000000 : (activity.tries || 1);
           if (job.attemptsMade >= maxAttempts - 1) {
-            // Final attempt failed
             logger.error(`[ActivityWorker] Activity ${activityId} failed after all retries`, error);
             
-            // Append error event to history
             await storage.appendEvent(workflowId, {
               type: 'activity',
               id: activityId,
@@ -186,17 +196,23 @@ export function startActivityWorker(): Worker {
               },
             });
 
-            // Enqueue workflow resume job
             await queues.workflow.add('resume', {
               workflowId,
               isResume: true,
             });
+
+            if (config.lifecycleHooks?.activity?.onFailed) {
+              try {
+                await config.lifecycleHooks.activity.onFailed(workflowId, activityId, activityClass, error as Error);
+              } catch (hookError) {
+                logger.error('Activity onFailed hook failed', hookError);
+              }
+            }
           }
 
-          throw error; // Propagate for BullMQ retry logic
+          throw error;
         }
       } finally {
-        // Release lock
         await storage.releaseLock(workflowId, `activity:${activityId}`);
       }
     },
