@@ -1,4 +1,4 @@
-import type { DurabullLogger } from '../config/global';
+import { Durabull, DurabullLogger } from '../config/global';
 
 const noop = () => {
   /* noop */
@@ -57,6 +57,10 @@ const consoleLogger: Logger = {
 };
 
 export function getLogger(): Logger {
+  const instance = Durabull.getActive();
+  if (instance) {
+    return createLoggerFromConfig(instance.getConfig().logger);
+  }
   return consoleLogger;
 }
 

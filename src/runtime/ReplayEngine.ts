@@ -37,11 +37,13 @@ export class ReplayEngine {
       workflowId,
       workflow,
       record,
+      history,
       isResume,
       clockCursor: 0,
       timerCursor: 0,
       sideEffectCursor: 0,
       activityCursor: 0,
+      childWorkflowCursor: 0,
     };
 
     const signalMethods = getSignalMethods(workflow.constructor);

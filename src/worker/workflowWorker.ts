@@ -86,6 +86,14 @@ export function startWorkflowWorker(instance?: Durabull): Worker {
 
         const previousWaiting = record.waiting ? { ...record.waiting } : undefined;
 
+        if (record.status === 'pending' && config.lifecycleHooks?.workflow?.onStart) {
+          try {
+            await config.lifecycleHooks.workflow.onStart(workflowId, resolvedWorkflowName, record.args || []);
+          } catch (hookError) {
+            logger.error('Workflow onStart hook failed', hookError);
+          }
+        }
+
         record.status = 'running';
         record.waiting = undefined;
         record.updatedAt = Date.now();

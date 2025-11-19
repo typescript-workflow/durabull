@@ -10,6 +10,7 @@ import { getQueues } from './queues';
 import { generateWorkflowId, generateSideEffectId, generateActivityId, generateTimerId } from './runtime/ids';
 import { WorkflowRecord, WorkflowStatus } from './runtime/history';
 import { Durabull } from './config/global';
+import { createLoggerFromConfig } from './runtime/logger';
 import { replayWorkflow } from './runtime/replayer';
 import { WorkflowWaitError, WorkflowContinueAsNewError } from './errors';
 import { getWorkflowContext, getVirtualTimestamp, runInWorkflowContext, WorkflowExecutionContext } from './runtime/context';
@@ -64,7 +65,8 @@ export class WorkflowHandle<TArgs extends any[] = any[], TResult = any> {
       try {
         await config.lifecycleHooks.workflow.onStart(this.workflowId, this.workflowName, args);
       } catch (error) {
-        console.error('Workflow onStart hook failed', error);
+        const logger = createLoggerFromConfig(config.logger);
+        logger.error('Workflow onStart hook failed', error);
       }
     }
 
@@ -120,7 +122,9 @@ export class WorkflowHandle<TArgs extends any[] = any[], TResult = any> {
           // Execute query on the replayed instance
           return (workflow as any)[methodName](...args);
         } catch (error) {
-          console.error('Query execution failed', error);
+          const instance = Durabull.getActive();
+          const logger = createLoggerFromConfig(instance?.getConfig().logger);
+          logger.error('Query execution failed', error);
           throw error;
         }
       };
@@ -229,7 +233,7 @@ export class WorkflowStub {
     const storage = getStorage();
     const queues = getQueues();
     const timerId = WorkflowStub._generateTimerId();
-    const history = await storage.readHistory(ctx.workflowId);
+    const history = ctx.history || await storage.readHistory(ctx.workflowId);
 
     // Check if timer already fired (replay)
     if (history) {
@@ -465,8 +469,8 @@ export class WorkflowStub {
     }
 
     const storage = getStorage();
-    const sideEffectId = generateSideEffectId();
-    const history = await storage.readHistory(ctx.workflowId);
+    const sideEffectId = WorkflowStub._generateSideEffectId();
+    const history = ctx.history || await storage.readHistory(ctx.workflowId);
 
     // Check if side effect already executed (replay)
     if (history) {
@@ -506,8 +510,8 @@ export class WorkflowStub {
 
     const storage = getStorage();
     const queues = getQueues();
-    const childId = generateWorkflowId();
-    const history = await storage.readHistory(ctx.workflowId);
+    const childId = WorkflowStub._generateChildWorkflowId();
+    const history = ctx.history || await storage.readHistory(ctx.workflowId);
 
     // Check if child already completed (replay)
     if (history) {
@@ -561,6 +565,34 @@ export class WorkflowStub {
    */
   static _getContext(): WorkflowExecutionContext | null {
     return getWorkflowContext() || null;
+  }
+
+  /**
+   * Generate a deterministic ID for a side effect
+   */
+  static _generateSideEffectId(): string {
+    const ctx = getWorkflowContext();
+    if (!ctx) {
+      return generateSideEffectId();
+    }
+
+    const id = `se-${ctx.sideEffectCursor}`;
+    ctx.sideEffectCursor++;
+    return id;
+  }
+
+  /**
+   * Generate a deterministic ID for a child workflow
+   */
+  static _generateChildWorkflowId(): string {
+    const ctx = getWorkflowContext();
+    if (!ctx) {
+      return generateWorkflowId();
+    }
+
+    const id = `child-${ctx.childWorkflowCursor}`;
+    ctx.childWorkflowCursor++;
+    return id;
   }
 
   /**

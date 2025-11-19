@@ -1,6 +1,6 @@
 import { AsyncLocalStorage } from 'async_hooks';
 import { Workflow } from '../Workflow';
-import { WorkflowRecord } from './history';
+import { WorkflowRecord, HistoryEvent } from './history';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export interface WorkflowExecutionContext {
@@ -8,11 +8,13 @@ export interface WorkflowExecutionContext {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   workflow: Workflow<any, any>;
   record: WorkflowRecord;
+  history?: { events: HistoryEvent[]; cursor: number };
   isResume: boolean;
   clockCursor: number;
   timerCursor: number;
   sideEffectCursor: number;
   activityCursor: number;
+  childWorkflowCursor: number;
 }
 
 const workflowContext = new AsyncLocalStorage<WorkflowExecutionContext>();

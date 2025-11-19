@@ -136,7 +136,7 @@ export class WebhookRouter {
       }
 
       const webhookMethods = getWebhookMethods(WorkflowClass);
-      if (webhookMethods.length > 0 && !webhookMethods.includes('execute')) {
+      if (webhookMethods.length === 0 || !webhookMethods.includes('execute')) {
         return {
           statusCode: 403,
           body: { error: 'Workflow start not exposed via webhook' },

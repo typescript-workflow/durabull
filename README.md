@@ -25,9 +25,9 @@ Author workflows as `async *execute()` coroutines, orchestrate idempotent activi
 ### 1. Install dependencies
 
 ```bash
-npm install durabull
+npm install durabull bullmq ioredis
 # or
-pnpm add durabull
+pnpm add durabull bullmq ioredis
 ```
 
 ### 2. Configure Durabull
