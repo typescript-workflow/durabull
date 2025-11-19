@@ -241,11 +241,14 @@ export function startActivityWorker(instance?: Durabull): Worker {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         backoffStrategy: (attemptsMade: number, _type?: string, _err?: Error, job?: any) => {
           const activityJob = job as Job<ActivityJobData>;
-          if (activityJob?.data?.retryOptions?.backoff) {
+          if (activityJob?.data?.retryOptions?.backoff && Array.isArray(activityJob.data.retryOptions.backoff) && activityJob.data.retryOptions.backoff.length > 0) {
             const backoff = activityJob.data.retryOptions.backoff;
             // attemptsMade is 1-based. For first retry (attemptsMade=1), use index 0.
             const index = Math.max(0, Math.min(attemptsMade - 1, backoff.length - 1));
-            return backoff[index] * 1000;
+            // Ensure index is within bounds and value is a number
+            if (index >= 0 && index < backoff.length && typeof backoff[index] === 'number' && !isNaN(backoff[index])) {
+              return backoff[index] * 1000;
+            }
           }
 
           const backoffSchedule = [1, 2, 5, 10, 30, 60, 120];

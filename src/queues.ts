@@ -39,10 +39,10 @@ export function initQueues(redisUrl: string, workflowQueue: string, activityQueu
   });
 
   queues = {
-    workflow: new Queue(workflowQueue, { connection: connection.duplicate() }),
-    activity: new Queue(activityQueue, { connection: connection.duplicate() }),
-    workflowEvents: new QueueEvents(workflowQueue, { connection: connection.duplicate() }),
-    activityEvents: new QueueEvents(activityQueue, { connection: connection.duplicate() }),
+    workflow: new Queue(workflowQueue, { connection }),
+    activity: new Queue(activityQueue, { connection }),
+    workflowEvents: new QueueEvents(workflowQueue, { connection }),
+    activityEvents: new QueueEvents(activityQueue, { connection }),
     connection,
   };
   

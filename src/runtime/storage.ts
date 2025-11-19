@@ -111,11 +111,13 @@ export class RedisStorage implements Storage {
         }
       }
       if (mismatch) {
-        // Replace the stored events with the new events
-        await this.redis.del(eventsKey);
+        // Replace the stored events with the new events atomically
+        const pipeline = this.redis.multi();
+        pipeline.del(eventsKey);
         if (data.length > 0) {
-          await this.redis.rpush(eventsKey, ...data);
+          pipeline.rpush(eventsKey, ...data);
         }
+        await pipeline.exec();
       }
     }
   }

@@ -245,6 +245,11 @@ export class WorkflowStub {
       }
     }
 
+    const delayMs = Math.max(0, seconds * 1000);
+    if (delayMs === 0) {
+      return;
+    }
+
     // Check if timer started but not fired
     const startedEvent = history?.events.find(
       (e) => e.type === 'timer-started' && e.id === timerId
