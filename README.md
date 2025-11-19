@@ -35,7 +35,7 @@ pnpm add durabull
 ```typescript
 import { Durabull } from 'durabull';
 
-Durabull.configure({
+const durabull = new Durabull({
   redisUrl: process.env.REDIS_URL ?? 'redis://127.0.0.1:6379',
   queues: {
     workflow: 'durabull-workflow',
@@ -61,6 +61,8 @@ Durabull.configure({
   },
   // logger: optional structured logger with info/warn/error/debug methods
 });
+
+durabull.setActive();
 ```
 
 ### 3. Create an Activity
@@ -104,6 +106,32 @@ await wf.start('World');
 console.log(await wf.output()); // "Hello, World!"
 ```
 
+### 🪝 Webhooks
+
+Expose workflows via HTTP using `createWebhookRouter`.
+
+```typescript
+import { createWebhookRouter, TokenAuthStrategy } from 'durabull';
+import { GreetingWorkflow } from './GreetingWorkflow';
+
+const router = createWebhookRouter({
+  authStrategy: new TokenAuthStrategy('my-secret-token'),
+});
+
+router.registerWebhookWorkflow('greeting', GreetingWorkflow);
+
+// Use with Express/Fastify/etc.
+app.post('/webhooks/*', async (req, res) => {
+  const response = await router.handle({
+    method: req.method,
+    path: req.path,
+    headers: req.headers,
+    body: req.body,
+  });
+  res.status(response.statusCode).send(response.body);
+});
+```
+
 ---
 
 ## 🧠 Why Durabull?
@@ -117,6 +145,7 @@ console.log(await wf.output()); // "Hello, World!"
 | 🧵 **Saga & Compensation**       | Built-in support for distributed transactions.                           |
 | ⏱ **Timers & Await**             | Durable timers via `WorkflowStub.timer()` and `WorkflowStub.await()`.    |
 | 🩺 **Observability**             | Full event history, heartbeats, and pruning controls.                    |
+| 🪝 **Webhooks**                  | Trigger workflows and signals via HTTP with pluggable auth.              |
 
 ---
 

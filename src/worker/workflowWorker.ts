@@ -31,8 +31,8 @@ export function startWorkflowWorker(instance?: Durabull): Worker {
   // Initialize queues if not already initialized
   initQueues(
     initialConfig.redisUrl,
-    initialConfig.queues!.workflow!,
-    initialConfig.queues!.activity!
+    initialConfig.queues.workflow,
+    initialConfig.queues.activity
   );
   
   const logger = createLoggerFromConfig(initialConfig.logger);
@@ -42,7 +42,7 @@ export function startWorkflowWorker(instance?: Durabull): Worker {
   });
 
   const worker = new Worker(
-    initialConfig.queues!.workflow!,
+    initialConfig.queues.workflow,
     async (job: Job<WorkflowJobData>) => {
       const config = durabullInstance.getConfig();
       const { workflowId, workflowName, isResume = false, timerId } = job.data;
@@ -214,6 +214,11 @@ export function startWorkflowWorker(instance?: Durabull): Worker {
 
   worker.on('failed', (job: Job | undefined, err: Error) => {
     logger.error(`[WorkflowWorker] Job ${job?.id} failed`, err);
+  });
+
+  worker.on('closed', async () => {
+    await connection.quit();
+    logger.info('[WorkflowWorker] Connection closed');
   });
 
   logger.info('[WorkflowWorker] Started');

@@ -69,11 +69,24 @@ export class ActivityStub {
     }
 
     let activityName: string;
+    let defaultTries: number | undefined;
+    let defaultBackoff: number[] | undefined;
 
     if (typeof activityClassOrName === 'string') {
       activityName = activityClassOrName;
     } else {
       activityName = activityClassOrName.name;
+      try {
+        const instance = new activityClassOrName();
+        defaultTries = instance.tries;
+        // We can't easily get the backoff method result without calling it, 
+        // but backoff() is a method returning number[].
+        if (instance.backoff) {
+            defaultBackoff = instance.backoff();
+        }
+      } catch (e) {
+        // Ignore instantiation errors
+      }
     }
 
     // Queue activity and return promise that will be resolved by workflow worker via history replay
@@ -105,10 +118,19 @@ export class ActivityStub {
 
       // Build retry options from activity metadata and per-invocation overrides
       const retryOptions: { tries?: number; timeout?: number; backoff?: number[] } = {};
-      if (options?.tries !== undefined) retryOptions.tries = options.tries;
+      
+      const tries = options?.tries ?? defaultTries;
+      if (tries !== undefined) retryOptions.tries = tries;
+      
       if (options?.timeout !== undefined) retryOptions.timeout = options.timeout;
-      if (options?.backoff) retryOptions.backoff = options.backoff;
+      
+      const backoff = options?.backoff ?? defaultBackoff;
+      if (backoff) retryOptions.backoff = backoff;
 
+      // Map to BullMQ options
+      // tries: 0 means retry forever (MAX_INT)
+      const attempts = (tries === 0) ? Number.MAX_SAFE_INTEGER : (tries || 1);
+      
       // Queue the activity job (only on first execution, not replay)
       await queues.activity.add('execute', {
         workflowId,
@@ -116,6 +138,11 @@ export class ActivityStub {
         activityId,
         args,
         retryOptions: Object.keys(retryOptions).length > 0 ? retryOptions : undefined,
+      }, {
+        attempts,
+        backoff: {
+            type: 'custom', // We use the custom strategy defined in worker
+        }
       });
 
       // Throw WorkflowWaitError to suspend execution - worker will resume when activity completes

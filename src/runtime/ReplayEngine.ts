@@ -1,6 +1,7 @@
 import { Workflow } from '../Workflow';
 import { WorkflowRecord, HistoryEvent } from './history';
-import { WorkflowStub, WorkflowWaitError, WorkflowContinueAsNewError } from '../WorkflowStub';
+import { WorkflowWaitError, WorkflowContinueAsNewError } from '../errors';
+import { runInWorkflowContext } from './context';
 import { getSignalMethods } from '../decorators';
 
 const isPromiseLike = <T = unknown>(value: unknown): value is PromiseLike<T> => {
@@ -109,7 +110,7 @@ export class ReplayEngine {
     let result: IteratorResult<unknown, unknown> | undefined;
 
     try {
-      await WorkflowStub._run(context, async () => {
+      await runInWorkflowContext(context, async () => {
         generator = workflow.execute(...effectiveArgs);
         result = await generator.next();
       });
@@ -135,7 +136,7 @@ export class ReplayEngine {
 
         if (isPromiseLike(result.value)) {
           try {
-            const resolved = await WorkflowStub._run(context, async () => await result!.value);
+            const resolved = await runInWorkflowContext(context, async () => await result!.value);
             
             currentIndex++;
             if (onStep) {
@@ -143,7 +144,7 @@ export class ReplayEngine {
                 await onStep(currentIndex, history);
             }
             
-            result = await WorkflowStub._run(context, async () => await generator.next(resolved));
+            result = await runInWorkflowContext(context, async () => await generator.next(resolved));
           } catch (error) {
              if (error instanceof WorkflowWaitError || (error as Error).name === 'WorkflowWaitError') {
                return { 
@@ -161,7 +162,7 @@ export class ReplayEngine {
                };
              }
              
-             result = await WorkflowStub._run(context, async () => await generator.throw(error));
+             result = await runInWorkflowContext(context, async () => await generator.throw(error));
           }
         } else {
           currentIndex++;
@@ -169,7 +170,7 @@ export class ReplayEngine {
               history.cursor = currentIndex;
               await onStep(currentIndex, history);
           }
-          result = await WorkflowStub._run(context, async () => await generator.next(result!.value));
+          result = await runInWorkflowContext(context, async () => await generator.next(result!.value));
         }
       }
       

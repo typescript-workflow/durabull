@@ -51,10 +51,17 @@ export interface DurabullLogger {
   debug?: (...args: unknown[]) => void;
 }
 
+export interface ResolvedDurabullConfig extends DurabullGlobalConfig {
+  queues: {
+    workflow: string;
+    activity: string;
+  };
+}
+
 let activeInstance: Durabull | null = null;
 
 export class Durabull {
-  private config: DurabullGlobalConfig;
+  private config: ResolvedDurabullConfig;
   private workflowRegistry = new Map<string, new () => Workflow<unknown[], unknown>>();
   private activityRegistry = new Map<string, new () => Activity<unknown[], unknown>>();
 
@@ -73,7 +80,7 @@ export class Durabull {
     };
   }
 
-  getConfig(): DurabullGlobalConfig {
+  getConfig(): ResolvedDurabullConfig {
     return this.config;
   }
 
@@ -97,13 +104,13 @@ export class Durabull {
     if (this.config.queueRouter && workflowName) {
       const routed = this.config.queueRouter(workflowName, context);
       return {
-        workflow: routed.workflow || this.config.queues!.workflow!,
-        activity: routed.activity || this.config.queues!.activity!,
+        workflow: routed.workflow || this.config.queues.workflow,
+        activity: routed.activity || this.config.queues.activity,
       };
     }
     return {
-      workflow: this.config.queues!.workflow!,
-      activity: this.config.queues!.activity!,
+      workflow: this.config.queues.workflow,
+      activity: this.config.queues.activity,
     };
   }
 

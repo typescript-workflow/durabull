@@ -23,6 +23,18 @@ let queues: Queues | null = null;
  * Initialize queues with explicit configuration
  */
 export function initQueues(redisUrl: string, workflowQueue: string, activityQueue: string): Queues {
+  if (queues) {
+    // Warn or close? Closing might be dangerous if other parts are using it.
+    // But overwriting is definitely a leak.
+    // For now, let's return existing if config matches?
+    // But we don't know if config matches easily.
+    // Let's just close the old one to be safe against leaks, assuming re-init means restart.
+    // Actually, async close in sync function is hard.
+    // Let's just throw if already initialized?
+    // Or better, make it idempotent.
+    return queues;
+  }
+
   const connection = new Redis(redisUrl, {
     maxRetriesPerRequest: null,
   });
@@ -49,8 +61,8 @@ export function getQueues(): Queues {
       const config = instance.getConfig();
       return initQueues(
         config.redisUrl,
-        config.queues!.workflow!,
-        config.queues!.activity!
+        config.queues.workflow,
+        config.queues.activity
       );
     }
     

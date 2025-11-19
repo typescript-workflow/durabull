@@ -92,7 +92,7 @@ export abstract class Activity<TArgs extends unknown[] = unknown[], TResult = un
     throw lastError || new Error('Activity execution failed');
   }
 
-  private async _executeWithTimeout(timeoutMs: number, ...args: TArgs): Promise<TResult> {
+  async _executeWithTimeout(timeoutMs: number, ...args: TArgs): Promise<TResult> {
     return await new Promise<TResult>((resolve, reject) => {
       const timer = setTimeout(() => {
         clearTimeout(timer);

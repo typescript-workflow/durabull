@@ -72,30 +72,61 @@ export class RedisStorage implements Storage {
 
   /**
    * Write complete history
+   * Optimized to only update cursor if events are managed via appendEvent
    */
   async writeHistory(id: string, hist: History): Promise<void> {
-    const key = this.getHistoryKey(id);
-    const data = this.serializer.serialize(hist);
-    await this.redis.set(key, data);
+    const eventsKey = this.getHistoryEventsKey(id);
+    const cursorKey = this.getHistoryCursorKey(id);
+
+    // If initializing or clearing
+    if (hist.events.length === 0) {
+      await this.redis.del(eventsKey);
+      await this.redis.set(cursorKey, 0);
+      return;
+    }
+
+    // Update cursor
+    await this.redis.set(cursorKey, hist.cursor);
+
+    // Check if list exists
+    const exists = await this.redis.exists(eventsKey);
+    if (!exists) {
+      const data = hist.events.map(e => this.serializer.serialize(e));
+      if (data.length > 0) {
+        await this.redis.rpush(eventsKey, ...data);
+      }
+    }
   }
 
   /**
    * Read history
    */
   async readHistory(id: string): Promise<History | null> {
-    const key = this.getHistoryKey(id);
-    const data = await this.redis.get(key);
-    if (!data) return null;
-    return this.serializer.deserialize<History>(data);
+    const eventsKey = this.getHistoryEventsKey(id);
+    const cursorKey = this.getHistoryCursorKey(id);
+
+    const [eventsData, cursorData] = await Promise.all([
+      this.redis.lrange(eventsKey, 0, -1),
+      this.redis.get(cursorKey)
+    ]);
+
+    if (eventsData.length === 0 && !cursorData) {
+      return null;
+    }
+
+    const events = eventsData.map(item => this.serializer.deserialize<HistoryEvent>(item));
+    const cursor = cursorData ? parseInt(cursorData, 10) : 0;
+
+    return { events, cursor };
   }
 
   /**
    * Append event to history (optimized)
    */
   async appendEvent(id: string, ev: HistoryEvent): Promise<void> {
-    const hist = await this.readHistory(id) || { events: [], cursor: 0 };
-    hist.events.push(ev);
-    await this.writeHistory(id, hist);
+    const key = this.getHistoryEventsKey(id);
+    const data = this.serializer.serialize(ev);
+    await this.redis.rpush(key, data);
   }
 
   /**
@@ -183,12 +214,16 @@ export class RedisStorage implements Storage {
     await this.redis.quit();
   }
 
-  private getRecordKey(id: string): string {
-    return `durabull:wf:${id}:record`;
+  private getHistoryEventsKey(id: string): string {
+    return `durabull:wf:${id}:history:events`;
   }
 
-  private getHistoryKey(id: string): string {
-    return `durabull:wf:${id}:history`;
+  private getHistoryCursorKey(id: string): string {
+    return `durabull:wf:${id}:history:cursor`;
+  }
+
+  private getRecordKey(id: string): string {
+    return `durabull:wf:${id}:record`;
   }
 
   private getSignalsKey(id: string): string {

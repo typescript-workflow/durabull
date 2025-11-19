@@ -12,6 +12,8 @@ import {
   startWorkflowWorker,
   startActivityWorker,
 } from '../../src';
+import { closeQueues } from '../../src/queues';
+import { closeStorage } from '../../src/runtime/storage';
 import { Worker } from 'bullmq';
 
 jest.setTimeout(60000);
@@ -23,12 +25,22 @@ const testQueuePrefix = `test-integration-${Date.now()}`;
 
 const lifecycleEvents: Array<{ type: string; id: string; name: string }> = [];
 
+const noop = () => {};
+
 beforeAll(async () => {
+  const redisUrl = process.env.REDIS_URL || 'redis://redis:6379';
+
   durabull = new Durabull({
-    redisUrl: process.env.REDIS_URL || 'redis://redis:6379',
+    redisUrl,
     queues: {
       workflow: `${testQueuePrefix}-workflow`,
       activity: `${testQueuePrefix}-activity`,
+    },
+    logger: {
+      info: noop,
+      warn: noop,
+      error: noop,
+      debug: noop,
     },
     lifecycleHooks: {
       workflow: {
@@ -74,10 +86,6 @@ afterAll(async () => {
   
   await new Promise((resolve) => setTimeout(resolve, 1000));
   
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
-  const { closeQueues } = require('../../src/queues');
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
-  const { closeStorage } = require('../../src/runtime/storage');
   await closeQueues();
   await closeStorage();
   

@@ -1,5 +1,4 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
-/* eslint-disable @typescript-eslint/no-var-requires */
 /**
  * WorkflowStub - interface for controlling and executing workflows (Durable Mode Only)
  */
@@ -8,71 +7,15 @@ import { Workflow } from './Workflow';
 import { getQueryMethods } from './decorators';
 import { getStorage } from './runtime/storage';
 import { getQueues } from './queues';
-import { generateWorkflowId } from './runtime/ids';
+import { generateWorkflowId, generateSideEffectId, generateActivityId, generateTimerId } from './runtime/ids';
 import { WorkflowRecord, WorkflowStatus } from './runtime/history';
+import { Durabull } from './config/global';
+import { replayWorkflow } from './runtime/replayer';
+import { WorkflowWaitError, WorkflowContinueAsNewError } from './errors';
+import { getWorkflowContext, getVirtualTimestamp, runInWorkflowContext, WorkflowExecutionContext } from './runtime/context';
 
 export { WorkflowStatus } from './runtime/history';
-
-/**
- * Error thrown when workflow needs to wait for external events
- */
-export class WorkflowWaitError extends Error {
-  constructor(message: string = 'Workflow waiting') {
-    super(message);
-    this.name = 'WorkflowWaitError';
-  }
-}
-
-/**
- * Error thrown when workflow continues as new
- */
-export class WorkflowContinueAsNewError extends Error {
-  constructor(public workflowId: string) {
-    super(`Workflow continued as new: ${workflowId}`);
-    this.name = 'WorkflowContinueAsNewError';
-  }
-}
-
-import { AsyncLocalStorage } from 'async_hooks';
-
-const getVirtualTimestamp = (workflowId?: string): number => {
-  const ctx = workflowContext.getStore();
-  if (!ctx || !workflowId) {
-    return Date.now();
-  }
-  
-  // Use clock cursor for deterministic replay
-  const cursor = ctx.clockCursor ?? 0;
-  const existing = ctx.record.clockEvents?.[cursor];
-  
-  if (typeof existing === 'number' && !Number.isNaN(existing)) {
-    ctx.clockCursor = cursor + 1;
-    return existing;
-  }
-  
-  // First execution - record timestamp
-  const timestamp = Date.now();
-  if (!ctx.record.clockEvents) {
-    ctx.record.clockEvents = [];
-  }
-  ctx.record.clockEvents[cursor] = timestamp;
-  ctx.clockCursor = cursor + 1;
-  
-  return timestamp;
-};
-
-interface WorkflowExecutionContext {
-  workflowId: string;
-  workflow: Workflow<any, any>;
-  record: WorkflowRecord;
-  isResume: boolean;
-  clockCursor: number;
-  timerCursor: number;
-  sideEffectCursor: number;
-  activityCursor: number;
-}
-
-const workflowContext = new AsyncLocalStorage<WorkflowExecutionContext>();
+export { WorkflowWaitError, WorkflowContinueAsNewError } from './errors';
 
 export interface WorkflowDispatchOptions {
   id?: string;
@@ -96,7 +39,6 @@ export class WorkflowHandle<TArgs extends any[] = any[], TResult = any> {
   async start(...args: TArgs): Promise<void> {
     const storage = getStorage();
     const queues = getQueues();
-    const { Durabull } = require('./config/global');
     const instance = Durabull.getActive();
     
     if (!instance) {
@@ -171,8 +113,6 @@ export class WorkflowHandle<TArgs extends any[] = any[], TResult = any> {
 
     for (const methodName of queryMethods) {
       proxy[methodName] = async (...args: any[]) => {
-        const { replayWorkflow } = require('./runtime/replayer');
-        
         try {
           // Replay workflow to get current state
           const { workflow } = await replayWorkflow(this.workflowId, WorkflowClass);
@@ -201,7 +141,6 @@ export class WorkflowStub {
     workflowClassOrName: (new () => T) | string,
     options?: WorkflowDispatchOptions
   ): Promise<WorkflowHandle<TArgs, TResult>> {
-    const { Durabull } = require('./config/global');
     const instance = Durabull.getActive();
     
     if (!instance) {
@@ -263,7 +202,7 @@ export class WorkflowStub {
    * Get current time (replay-safe for workflows)
    */
   static now(): Date {
-    const ctx = workflowContext.getStore();
+    const ctx = getWorkflowContext();
     if (!ctx) {
       return new Date();
     }
@@ -280,16 +219,13 @@ export class WorkflowStub {
       ? parseInt(durationSeconds, 10) 
       : durationSeconds;
     
-    const ctx = workflowContext.getStore();
+    const ctx = getWorkflowContext();
     if (!ctx) {
       // Not in workflow context - just sleep
       await new Promise(resolve => setTimeout(resolve, seconds * 1000));
       return;
     }
 
-    const { getStorage } = require('./runtime/storage');
-    const { getQueues } = require('./queues');
-    
     const storage = getStorage();
     const queues = getQueues();
     const timerId = WorkflowStub._generateTimerId();
@@ -298,7 +234,7 @@ export class WorkflowStub {
     // Check if timer already fired (replay)
     if (history) {
       const firedEvent = history.events.find(
-        (e: any) => e.type === 'timer-fired' && e.id === timerId
+        (e) => e.type === 'timer-fired' && e.id === timerId
       );
       if (firedEvent) {
         return; // Timer completed
@@ -307,7 +243,7 @@ export class WorkflowStub {
 
     // Check if timer started but not fired
     const startedEvent = history?.events.find(
-      (e: any) => e.type === 'timer-started' && e.id === timerId
+      (e) => e.type === 'timer-started' && e.id === timerId
     );
 
     if (!startedEvent) {
@@ -357,7 +293,7 @@ export class WorkflowStub {
       return;
     }
 
-    const ctx = workflowContext.getStore();
+    const ctx = getWorkflowContext();
     if (!ctx) {
       // Not in workflow context - poll
       while (!predicate()) {
@@ -366,9 +302,6 @@ export class WorkflowStub {
       return;
     }
 
-    const { getStorage } = require('./runtime/storage');
-    const { getQueues } = require('./queues');
-    
     const storage = getStorage();
     const queues = getQueues();
     
@@ -414,7 +347,7 @@ export class WorkflowStub {
       ? parseInt(durationSeconds, 10)
       : durationSeconds;
 
-    const ctx = workflowContext.getStore();
+    const ctx = getWorkflowContext();
     if (!ctx) {
       // Not in workflow - use regular timeout
       const start = Date.now();
@@ -427,9 +360,6 @@ export class WorkflowStub {
       return true;
     }
 
-    const { getStorage } = require('./runtime/storage');
-    const { getQueues } = require('./queues');
-    
     const storage = getStorage();
     const queues = getQueues();
     const record = await storage.readRecord(ctx.workflowId);
@@ -479,15 +409,11 @@ export class WorkflowStub {
    * Continue as new workflow
    */
   static async continueAsNew(...args: any[]): Promise<never> {
-    const ctx = workflowContext.getStore();
+    const ctx = getWorkflowContext();
     if (!ctx) {
       throw new Error('continueAsNew can only be called from within a workflow');
     }
 
-    const { getStorage } = require('./runtime/storage');
-    const { getQueues } = require('./queues');
-    const { generateWorkflowId } = require('./runtime/ids');
-    
     const storage = getStorage();
     const queues = getQueues();
     const newWorkflowId = generateWorkflowId();
@@ -532,15 +458,12 @@ export class WorkflowStub {
    * Execute side effect (non-deterministic code)
    */
   static async sideEffect<T>(fn: () => T | Promise<T>): Promise<T> {
-    const ctx = workflowContext.getStore();
+    const ctx = getWorkflowContext();
     if (!ctx) {
       // Not in workflow - just execute
       return await fn();
     }
 
-    const { getStorage } = require('./runtime/storage');
-    const { generateSideEffectId } = require('./runtime/ids');
-    
     const storage = getStorage();
     const sideEffectId = generateSideEffectId();
     const history = await storage.readHistory(ctx.workflowId);
@@ -548,9 +471,9 @@ export class WorkflowStub {
     // Check if side effect already executed (replay)
     if (history) {
       const existingEffect = history.events.find(
-        (e: any) => e.type === 'sideEffect' && e.id === sideEffectId
+        (e) => e.type === 'sideEffect' && e.id === sideEffectId
       );
-      if (existingEffect) {
+      if (existingEffect && existingEffect.type === 'sideEffect') {
         return existingEffect.value as T;
       }
     }
@@ -576,15 +499,11 @@ export class WorkflowStub {
     workflowClassOrName: (new () => Workflow<any, any>) | string,
     ...args: any[]
   ): Promise<TResult> {
-    const ctx = workflowContext.getStore();
+    const ctx = getWorkflowContext();
     if (!ctx) {
       throw new Error('child workflows can only be called from within a workflow');
     }
 
-    const { getStorage } = require('./runtime/storage');
-    const { getQueues } = require('./queues');
-    const { generateWorkflowId } = require('./runtime/ids');
-    
     const storage = getStorage();
     const queues = getQueues();
     const childId = generateWorkflowId();
@@ -593,10 +512,10 @@ export class WorkflowStub {
     // Check if child already completed (replay)
     if (history) {
       const existingChild = history.events.find(
-        (e: any) => e.type === 'child' && e.id === childId
+        (e) => e.type === 'child' && e.id === childId
       );
-      if (existingChild) {
-        if ('error' in existingChild && existingChild.error) {
+      if (existingChild && existingChild.type === 'child') {
+        if (existingChild.error) {
           throw new Error(existingChild.error.message || 'Child workflow failed');
         }
         return existingChild.result as TResult;
@@ -641,16 +560,15 @@ export class WorkflowStub {
    * Get workflow execution context (internal use)
    */
   static _getContext(): WorkflowExecutionContext | null {
-    return workflowContext.getStore() || null;
+    return getWorkflowContext() || null;
   }
 
   /**
    * Generate a deterministic ID for an activity
    */
   static _generateActivityId(): string {
-    const ctx = workflowContext.getStore();
+    const ctx = getWorkflowContext();
     if (!ctx) {
-      const { generateActivityId } = require('./runtime/ids');
       return generateActivityId();
     }
     
@@ -663,9 +581,8 @@ export class WorkflowStub {
    * Generate a deterministic ID for a timer
    */
   static _generateTimerId(): string {
-    const ctx = workflowContext.getStore();
+    const ctx = getWorkflowContext();
     if (!ctx) {
-      const { generateTimerId } = require('./runtime/ids');
       return generateTimerId();
     }
     
@@ -678,6 +595,6 @@ export class WorkflowStub {
    * Run code in workflow context (internal use by workers)
    */
   static _run<T>(ctx: WorkflowExecutionContext, fn: () => T): T {
-    return workflowContext.run(ctx, fn);
+    return runInWorkflowContext(ctx, fn);
   }
 }

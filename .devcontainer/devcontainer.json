@@ -4,8 +4,5 @@
   "service": "app",
   "workspaceFolder": "/workspaces/durabull",
   "forwardPorts": [6379],
-  "postCreateCommand": "npm i",
-  "remoteEnv": {
-    "REDIS_URL": "${localEnv:REDIS_URL:-redis://localhost:6379}"
-  }
+  "postCreateCommand": "npm i"
 }

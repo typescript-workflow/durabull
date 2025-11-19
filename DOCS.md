@@ -26,7 +26,7 @@ import { Durabull } from 'durabull';
 
 const myLogger = console; // Replace with your preferred logger implementation
 
-Durabull.configure({
+const durabull = new Durabull({
   redisUrl: process.env.REDIS_URL ?? 'redis://127.0.0.1:6379',
   queues: {
     workflow: 'durabull:workflow',
@@ -43,6 +43,8 @@ Durabull.configure({
     error: (...args) => myLogger.error(...args),
   },
 });
+
+durabull.setActive();
 ```
 
 - `redisUrl` configures both storage and BullMQ connections.
@@ -283,27 +285,27 @@ Durabull provides BullMQ-based worker helpers:
 
 ```typescript
 import { startWorkflowWorker, startActivityWorker } from 'durabull/worker';
+import { Durabull } from 'durabull';
 
-const workflowWorker = startWorkflowWorker();
-const activityWorker = startActivityWorker();
+// Initialize Durabull first
+const durabull = new Durabull({ ... });
+durabull.setActive();
+
+// Register classes
+durabull.registerWorkflow('CheckoutWorkflow', CheckoutWorkflow);
+durabull.registerActivity('FetchInvoice', FetchInvoice);
+
+// Start workers
+const workflowWorker = startWorkflowWorker(durabull);
+const activityWorker = startActivityWorker(durabull);
 ```
 
 Both workers:
 
-- Resolve workflow/activity constructors via `registerWorkflow()` / `registerActivity()`
+- Resolve workflow/activity constructors via the Durabull instance registry
 - Acquire Redis locks to ensure single execution per workflow/activity
 - Persist history, manage wait states, and enqueue resume jobs
 - Respect configured retry policies and non-retryable errors
-
-Register classes during bootstrap (before starting workers):
-
-```typescript
-import { registerWorkflow } from 'durabull/worker/workflowWorker';
-import { registerActivity } from 'durabull/worker/activityWorker';
-
-registerWorkflow('CheckoutWorkflow', CheckoutWorkflow);
-registerActivity('FetchInvoice', FetchInvoice);
-```
 
 ---
 
@@ -313,14 +315,27 @@ Durabull ships an optional webhook router for HTTP-based control:
 
 ```typescript
 import express from 'express';
-import { WebhookRouter, registerWebhookWorkflow } from 'durabull/webhooks';
+import { createWebhookRouter, TokenAuthStrategy } from 'durabull/webhooks';
 import { GreetingWorkflow } from '../workflows/GreetingWorkflow';
 
-registerWebhookWorkflow('greeting-workflow', GreetingWorkflow);
+const router = createWebhookRouter({
+  authStrategy: new TokenAuthStrategy('my-secret-token'),
+});
+
+router.registerWebhookWorkflow('greeting-workflow', GreetingWorkflow);
 
 const app = express();
 app.use(express.json());
-app.use('/webhooks', WebhookRouter.routes());
+
+app.post('/webhooks/*', async (req, res) => {
+  const response = await router.handle({
+    method: req.method,
+    path: req.path,
+    headers: req.headers as Record<string, string>,
+    body: req.body,
+  });
+  res.status(response.statusCode).send(response.body);
+});
 ```
 
 Endpoints support:
@@ -328,42 +343,10 @@ Endpoints support:
 - `POST /webhooks/start/<workflow>`
 - `POST /webhooks/signal/<workflow>/<workflowId>/<signal>`
 
-Authentication strategies (`NoneAuthStrategy`, `TokenAuthStrategy`, `SignatureAuthStrategy`) are configurable through global config.
+Authentication strategies (`NoneAuthStrategy`, `TokenAuthStrategy`, `SignatureAuthStrategy`) must be explicitly configured.
 
 ---
 
-## Testing
-
-Durabull includes a `TestKit` for synchronous, deterministic tests without Redis or BullMQ.
-
-```typescript
-import { TestKit, WorkflowStub } from 'durabull/test';
-import { GreetingWorkflow } from '../app/workflows/GreetingWorkflow';
-import { SayHello } from '../app/activities/SayHello';
-
-test('greets the user', async () => {
-  TestKit.fake();
-  TestKit.mock(SayHello, 'Hello, test!');
-
-  const wf = await WorkflowStub.make(GreetingWorkflow);
-  await wf.start('world');
-
-  expect(await wf.output()).toBe('Hello, test!');
-  TestKit.assertDispatched(SayHello, 1);
-});
-```
-
-Features:
-
-- `TestKit.fake()` routes activities through mocks/synchronous execution.
-- `TestKit.mock(ActivityClass, value | fn)` provides fake results.
-- `TestKit.assertDispatched`, `assertNotDispatched`, and `getDispatches` introspect activity usage.
-- `TestKit.fakeTime(workflowId?)`, `TestKit.travel(amount, unit)` offer deterministic time travel.
-- `TestKit.now()` returns the current virtual time (integrates with `WorkflowStub.now()`).
-
-Restore the real runtime with `TestKit.restore()`.
-
----
 
 ## Determinism & Idempotency Guidelines
 

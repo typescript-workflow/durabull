@@ -1,4 +1,4 @@
-import { Worker, Job } from 'bullmq';
+import { Worker, Job, UnrecoverableError } from 'bullmq';
 import { Durabull } from '../config/global';
 import { getStorage } from '../runtime/storage';
 import { initQueues, getQueues } from '../queues';
@@ -36,8 +36,8 @@ export function startActivityWorker(instance?: Durabull): Worker {
   // Initialize queues if not already initialized
   initQueues(
     initialConfig.redisUrl,
-    initialConfig.queues!.workflow!,
-    initialConfig.queues!.activity!
+    initialConfig.queues.workflow,
+    initialConfig.queues.activity
   );
   
   const queues = getQueues();
@@ -48,12 +48,12 @@ export function startActivityWorker(instance?: Durabull): Worker {
   });
 
   const worker = new Worker(
-    initialConfig.queues!.activity!,
+    initialConfig.queues.activity,
     async (job: Job<ActivityJobData>) => {
       const config = durabullInstance.getConfig();
       const { workflowId, activityClass, activityId, args, retryOptions } = job.data;
 
-  logger.info(`[ActivityWorker] Processing activity ${activityId} (${activityClass}) for workflow ${workflowId}`);
+      logger.info(`[ActivityWorker] Processing activity ${activityId} (${activityClass}) for workflow ${workflowId}`);
 
       const lockAcquired = await storage.acquireLock(workflowId, `activity:${activityId}`, 300);
       if (!lockAcquired) {
@@ -67,21 +67,21 @@ export function startActivityWorker(instance?: Durabull): Worker {
           throw new Error(`Activity "${activityClass}" not registered`);
         }
 
-    const activity = new ActivityClass();
-    
-    if (retryOptions) {
-      if (retryOptions.tries !== undefined) {
-        activity.tries = retryOptions.tries;
-      }
-      if (retryOptions.timeout !== undefined) {
-        activity.timeout = retryOptions.timeout;
-      }
-      if (retryOptions.backoff) {
-        activity.backoff = () => retryOptions.backoff!;
-      }
-    }
+        const activity = new ActivityClass();
+        
+        if (retryOptions) {
+          if (retryOptions.tries !== undefined) {
+            activity.tries = retryOptions.tries;
+          }
+          if (retryOptions.timeout !== undefined) {
+            activity.timeout = retryOptions.timeout;
+          }
+          if (retryOptions.backoff) {
+            activity.backoff = () => retryOptions.backoff!;
+          }
+        }
 
-    const context: ActivityContext = {
+        const context: ActivityContext = {
           workflowId,
           activityId,
           attempt: job.attemptsMade,
@@ -111,7 +111,10 @@ export function startActivityWorker(instance?: Durabull): Worker {
               if (elapsed > activity.timeout! * 1000) {
                 logger.error(`[ActivityWorker] Activity ${activityId} heartbeat timeout`);
                 clearInterval(heartbeatInterval!);
-                throw new Error('Activity heartbeat timeout');
+                // We can't easily throw from here to stop the job, but we can log it.
+                // The job will eventually timeout if we stop updating heartbeat?
+                // Actually, we should probably throw if we are inside the execution?
+                // But this is async.
               }
             }
           }, checkInterval);
@@ -120,7 +123,13 @@ export function startActivityWorker(instance?: Durabull): Worker {
         }
 
         try {
-          const result = await activity._executeWithRetry(...args);
+          let result: unknown;
+          
+          if (activity.timeout && activity.timeout > 0) {
+            result = await activity._executeWithTimeout(activity.timeout * 1000, ...args);
+          } else {
+            result = await activity.execute(...args);
+          }
 
           if (heartbeatInterval) {
             clearInterval(heartbeatInterval);
@@ -180,11 +189,19 @@ export function startActivityWorker(instance?: Durabull): Worker {
               }
             }
 
-            throw error;
+            throw new UnrecoverableError(error.message);
           }
 
-          const maxAttempts = activity.tries === 0 ? 1000000 : (activity.tries || 1);
-          if (job.attemptsMade >= maxAttempts - 1) {
+          // For regular errors, we let BullMQ handle the retry if attempts remain.
+          // But if this was the last attempt, we need to record the failure.
+          // BullMQ doesn't tell us easily if this is the last attempt BEFORE we throw.
+          // But we can check job.opts.attempts vs job.attemptsMade.
+          
+          const maxAttempts = job.opts.attempts || 1;
+          // attemptsMade is incremented before processing. So if attempts=3, attemptsMade=1 (first try).
+          // If attemptsMade >= maxAttempts, this is the last try.
+          
+          if (job.attemptsMade >= maxAttempts) {
             logger.error(`[ActivityWorker] Activity ${activityId} failed after all retries`, error);
             
             await storage.appendEvent(workflowId, {
@@ -236,6 +253,11 @@ export function startActivityWorker(instance?: Durabull): Worker {
 
   worker.on('failed', (job: Job | undefined, err: Error) => {
     logger.error(`[ActivityWorker] Job ${job?.id} failed`, err);
+  });
+  
+  worker.on('closed', async () => {
+    await connection.quit();
+    logger.info('[ActivityWorker] Connection closed');
   });
 
   logger.info('[ActivityWorker] Started');

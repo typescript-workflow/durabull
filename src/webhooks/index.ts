@@ -93,7 +93,10 @@ export class WebhookRouter {
   private registry: Map<string, WorkflowConstructor>;
 
   constructor(config: WebhookRouterConfig = {}) {
-    this.authStrategy = config.authStrategy || new NoneAuthStrategy();
+    if (!config.authStrategy) {
+      throw new Error('WebhookRouter requires an authentication strategy. Use NoneAuthStrategy explicitly if you want no authentication (not recommended for production).');
+    }
+    this.authStrategy = config.authStrategy;
     this.registry = config.workflowRegistry || workflowRegistry;
   }
 
@@ -155,9 +158,10 @@ export class WebhookRouter {
         },
       };
     } catch (error) {
+      console.error('Webhook start failed', error);
       return {
         statusCode: 500,
-        body: { error: (error as Error).message },
+        body: { error: 'Internal Server Error' },
       };
     }
   }
@@ -209,19 +213,15 @@ export class WebhookRouter {
         },
       };
     } catch (error) {
+      console.error('Webhook signal failed', error);
       return {
         statusCode: 500,
-        body: { error: (error as Error).message },
+        body: { error: 'Internal Server Error' },
       };
     }
   }
 }
 
 export function createWebhookRouter(config?: WebhookRouterConfig): WebhookRouter {
-  const authStrategy = config?.authStrategy || new NoneAuthStrategy();
-  
-  return new WebhookRouter({
-    authStrategy,
-    workflowRegistry: config?.workflowRegistry,
-  });
+  return new WebhookRouter(config);
 }
