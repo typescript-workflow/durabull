@@ -21,7 +21,10 @@ interface WorkflowJobData {
  * Start the workflow worker
  */
 export function startWorkflowWorker(instance?: Durabull): Worker {
-  const durabullInstance = instance || (Durabull as any);
+  const durabullInstance = instance || Durabull.getActive();
+  if (!durabullInstance) {
+    throw new Error('Durabull instance not initialized. Call new Durabull(config) first or pass instance to startWorkflowWorker.');
+  }
   const initialConfig = durabullInstance.getConfig();
   const storage = getStorage();
   

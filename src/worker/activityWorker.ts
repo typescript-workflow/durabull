@@ -26,7 +26,10 @@ interface ActivityJobData {
  * Start the activity worker
  */
 export function startActivityWorker(instance?: Durabull): Worker {
-  const durabullInstance = instance || (Durabull as any);
+  const durabullInstance = instance || Durabull.getActive();
+  if (!durabullInstance) {
+    throw new Error('Durabull instance not initialized. Call new Durabull(config) first or pass instance to startActivityWorker.');
+  }
   const initialConfig = durabullInstance.getConfig();
   const storage = getStorage();
   
