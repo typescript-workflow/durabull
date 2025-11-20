@@ -97,32 +97,16 @@ export class RedisStorage implements Storage {
         await this.redis.rpush(eventsKey, ...data);
       }
     } else {
-      // Validate stored events match provided events
-      // Optimization: Check length first to avoid fetching all events if length mismatch
       const storedLength = await this.redis.llen(eventsKey);
-      let mismatch = false;
-
-      if (storedLength !== data.length) {
-        mismatch = true;
-      } else {
-        const storedEvents = await this.redis.lrange(eventsKey, 0, -1);
-        for (let i = 0; i < data.length; i++) {
-          if (storedEvents[i] !== data[i]) {
-            mismatch = true;
-            break;
-          }
-        }
+      if (storedLength === data.length) {
+        return;
       }
-      
-      if (mismatch) {
-        // Replace the stored events with the new events atomically
-        const pipeline = this.redis.multi();
-        pipeline.del(eventsKey);
-        if (data.length > 0) {
-          pipeline.rpush(eventsKey, ...data);
-        }
-        await pipeline.exec();
+      const pipeline = this.redis.multi();
+      pipeline.del(eventsKey);
+      if (data.length > 0) {
+        pipeline.rpush(eventsKey, ...data);
       }
+      await pipeline.exec();
     }
   }
 

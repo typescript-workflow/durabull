@@ -225,7 +225,6 @@ export class WorkflowStub {
     
     const ctx = getWorkflowContext();
     if (!ctx) {
-      // Not in workflow context - just sleep
       await new Promise(resolve => setTimeout(resolve, seconds * 1000));
       return;
     }
@@ -235,13 +234,22 @@ export class WorkflowStub {
     const timerId = WorkflowStub._generateTimerId();
     const history = ctx.history || await storage.readHistory(ctx.workflowId);
 
-    // Check if timer already fired (replay)
+    if (history && !ctx.eventIndex) {
+      ctx.eventIndex = new Map();
+      for (const event of history.events) {
+        if (event.id) {
+          ctx.eventIndex.set(`${event.type}:${event.id}`, event);
+        }
+      }
+    }
+
     if (history) {
-      const firedEvent = history.events.find(
-        (e) => e.type === 'timer-fired' && e.id === timerId
-      );
+      const firedEvent = ctx.eventIndex 
+        ? ctx.eventIndex.get(`timer-fired:${timerId}`)
+        : history.events.find((e) => e.type === 'timer-fired' && e.id === timerId);
+
       if (firedEvent) {
-        return; // Timer completed
+        return;
       }
     }
 
@@ -250,21 +258,24 @@ export class WorkflowStub {
       return;
     }
 
-    // Check if timer started but not fired
-    const startedEvent = history?.events.find(
-      (e) => e.type === 'timer-started' && e.id === timerId
-    );
+    const startedEvent = ctx.eventIndex
+      ? ctx.eventIndex.get(`timer-started:${timerId}`)
+      : history?.events.find((e) => e.type === 'timer-started' && e.id === timerId);
 
     if (!startedEvent) {
-      // Record timer start
-      await storage.appendEvent(ctx.workflowId, {
-        type: 'timer-started',
+      const event = {
+        type: 'timer-started' as const,
         id: timerId,
         ts: Date.now(),
         delay: seconds,
-      });
+      };
       
-      // Update workflow to waiting status
+      await storage.appendEvent(ctx.workflowId, event);
+      
+      if (ctx.eventIndex) {
+        ctx.eventIndex.set(`timer-started:${timerId}`, event);
+      }
+      
       const record = await storage.readRecord(ctx.workflowId);
       if (record) {
         record.status = 'waiting';
@@ -276,7 +287,6 @@ export class WorkflowStub {
         await storage.writeRecord(record);
       }
 
-      // Schedule resume job
       await queues.workflow.add(
         'resume',
         {
@@ -290,7 +300,6 @@ export class WorkflowStub {
       );
     }
 
-    // Suspend execution
     throw new WorkflowWaitError(`Timer ${timerId} waiting ${seconds}s`);
   }
 

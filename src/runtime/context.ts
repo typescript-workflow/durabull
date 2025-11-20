@@ -15,6 +15,8 @@ export interface WorkflowExecutionContext {
   sideEffectCursor: number;
   activityCursor: number;
   childWorkflowCursor: number;
+  // Index for O(1) event lookups
+  eventIndex?: Map<string, HistoryEvent>;
 }
 
 const workflowContext = new AsyncLocalStorage<WorkflowExecutionContext>();
