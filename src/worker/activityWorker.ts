@@ -127,7 +127,8 @@ export function startActivityWorker(instance?: Durabull): Worker {
           let result: unknown;
           
           if (activity.timeout && activity.timeout > 0) {
-            result = await activity._executeWithTimeout(activity.timeout * 1000, ...args);
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            result = await (activity as any)._executeWithTimeout(activity.timeout * 1000, ...args);
           } else {
             result = await activity.execute(...args);
           }

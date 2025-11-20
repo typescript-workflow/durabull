@@ -98,11 +98,14 @@ export class RedisStorage implements Storage {
       }
     } else {
       // Validate stored events match provided events
-      const storedEvents = await this.redis.lrange(eventsKey, 0, -1);
+      // Optimization: Check length first to avoid fetching all events if length mismatch
+      const storedLength = await this.redis.llen(eventsKey);
       let mismatch = false;
-      if (storedEvents.length !== data.length) {
+
+      if (storedLength !== data.length) {
         mismatch = true;
       } else {
+        const storedEvents = await this.redis.lrange(eventsKey, 0, -1);
         for (let i = 0; i < data.length; i++) {
           if (storedEvents[i] !== data[i]) {
             mismatch = true;
@@ -110,6 +113,7 @@ export class RedisStorage implements Storage {
           }
         }
       }
+      
       if (mismatch) {
         // Replace the stored events with the new events atomically
         const pipeline = this.redis.multi();

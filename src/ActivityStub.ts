@@ -58,7 +58,6 @@ export class ActivityStub {
     const isWrappedOptions = lastArg &&
       typeof lastArg === 'object' &&
       !Array.isArray(lastArg) &&
-      lastArg !== null &&
       Object.prototype.toString.call(lastArg) === '[object Object]' &&
       Object.prototype.hasOwnProperty.call(lastArg, '__options');
 

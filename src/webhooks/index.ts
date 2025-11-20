@@ -137,17 +137,10 @@ export class WebhookRouter {
         };
       }
 
-      const webhookMethods = getWebhookMethods(WorkflowClass);
-      if (webhookMethods.length === 0 || !webhookMethods.includes('execute')) {
-        const instance = Durabull.getActive();
-        const logger = createLoggerFromConfig(instance?.getConfig().logger);
-        logger.warn(`Workflow ${workflowName} start not exposed via webhook. Available methods: ${webhookMethods.join(', ')}`);
-        return {
-          statusCode: 403,
-          body: { error: 'Workflow start not exposed via webhook' },
-        };
-      }
-
+      // If the workflow is registered in the webhook registry, we assume it's allowed to start.
+      // We don't require @WebhookMethod on execute() because it's the default entry point.
+      // However, if the user wants to restrict it, they can just NOT register it here.
+      
   const payload = isRecord(body) ? body : {};
   const args: unknown[] = Array.isArray(payload.args) ? payload.args : [];
       const id = typeof payload.id === 'string' ? payload.id : undefined;
