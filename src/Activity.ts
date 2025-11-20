@@ -10,6 +10,7 @@ export interface ActivityContext {
   activityId: string;
   attempt: number;
   heartbeat: () => void | Promise<void>;
+  signal?: AbortSignal;
 }
 
 export abstract class Activity<TArgs extends unknown[] = unknown[], TResult = unknown> {
@@ -39,6 +40,10 @@ export abstract class Activity<TArgs extends unknown[] = unknown[], TResult = un
       throw new Error('workflowId() can only be called during activity execution');
     }
     return this.context.workflowId;
+  }
+
+  protected get signal(): AbortSignal | undefined {
+    return this.context?.signal;
   }
 
   _setContext(context: ActivityContext) {

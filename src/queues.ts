@@ -65,7 +65,7 @@ export function getQueues(): Queues {
       );
     }
     
-    return initQueues('redis://localhost:6379', 'durabull:workflow', 'durabull:activity');
+    throw new Error('Durabull instance not initialized. Call new Durabull(config) first.');
   }
   return queues;
 }

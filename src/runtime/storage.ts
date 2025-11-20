@@ -88,26 +88,26 @@ export class RedisStorage implements Storage {
     // Update cursor
     await this.redis.set(cursorKey, hist.cursor);
 
-    // Check if list exists
-    const exists = await this.redis.exists(eventsKey);
     const data = hist.events.map(e => this.serializer.serialize(e));
 
-    if (!exists) {
-      if (data.length > 0) {
-        await this.redis.rpush(eventsKey, ...data);
-      }
-    } else {
-      const storedLength = await this.redis.llen(eventsKey);
-      if (storedLength === data.length) {
-        return;
-      }
-      const pipeline = this.redis.multi();
-      pipeline.del(eventsKey);
-      if (data.length > 0) {
-        pipeline.rpush(eventsKey, ...data);
-      }
-      await pipeline.exec();
-    }
+    // Use Lua script for atomic check-and-set to avoid race conditions
+    const script = `
+      local key = KEYS[1]
+      local new_len = tonumber(ARGV[1])
+      local current_len = redis.call('LLEN', key)
+      
+      if current_len == new_len then
+        return 0
+      end
+      
+      redis.call('DEL', key)
+      if new_len > 0 then
+        redis.call('RPUSH', key, unpack(ARGV, 2))
+      end
+      return 1
+    `;
+
+    await this.redis.eval(script, 1, eventsKey, data.length, ...data);
   }
 
   /**

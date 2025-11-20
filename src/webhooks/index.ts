@@ -137,9 +137,14 @@ export class WebhookRouter {
         };
       }
 
-      // If the workflow is registered in the webhook registry, we assume it's allowed to start.
-      // We don't require @WebhookMethod on execute() because it's the default entry point.
-      // However, if the user wants to restrict it, they can just NOT register it here.
+      // Check if the workflow start (execute method) is exposed via webhook
+      const webhookMethods = getWebhookMethods(WorkflowClass);
+      if (!webhookMethods.includes('execute')) {
+        return {
+          statusCode: 404,
+          body: { error: 'Not found' },
+        };
+      }
       
   const payload = isRecord(body) ? body : {};
   const args: unknown[] = Array.isArray(payload.args) ? payload.args : [];
@@ -151,7 +156,7 @@ export class WebhookRouter {
       return {
         statusCode: 200,
         body: { 
-          workflowId: handle.id(),
+          workflowId: handle.id,
           status: 'started',
         },
       };
@@ -193,8 +198,8 @@ export class WebhookRouter {
       const webhookMethods = getWebhookMethods(WorkflowClass);
       if (webhookMethods.length === 0 || !webhookMethods.includes(signalName)) {
         return {
-          statusCode: 403,
-          body: { error: `Signal ${signalName} not exposed via webhook` },
+          statusCode: 404,
+          body: { error: 'Not found' },
         };
       }
 

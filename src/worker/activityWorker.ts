@@ -81,6 +81,8 @@ export function startActivityWorker(instance?: Durabull): Worker {
           }
         }
 
+        const abortController = new AbortController();
+
         const context: ActivityContext = {
           workflowId,
           activityId,
@@ -89,6 +91,7 @@ export function startActivityWorker(instance?: Durabull): Worker {
             const timeout = activity.timeout || 300; // Default 5 minutes
             await storage.refreshHeartbeat(workflowId, activityId, timeout);
           },
+          signal: abortController.signal,
         };
 
         activity._setContext(context);
@@ -111,11 +114,7 @@ export function startActivityWorker(instance?: Durabull): Worker {
               if (elapsed > activity.timeout! * 1000) {
                 logger.error(`[ActivityWorker] Activity ${activityId} heartbeat timeout`);
                 clearInterval(heartbeatInterval!);
-                // We can't easily throw from here to stop the job, but we can log it.
-                // The job will eventually timeout if we stop updating heartbeat?
-                // Actually, we should probably throw if we are inside the execution?
-                // But this is async.
-                // TODO: Implement cancellation via AbortController or similar mechanism
+                abortController.abort();
               }
             }
           }, checkInterval);
