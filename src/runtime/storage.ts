@@ -41,11 +41,14 @@ export interface Storage {
  */
 export class RedisStorage implements Storage {
   private redis: Redis;
-  private serializer = getSerializer(Durabull.isConfigured() ? Durabull.getConfig().serializer : 'json');
+  private serializer = getSerializer('json');
 
-  constructor(redisUrl?: string) {
-    const url = redisUrl || (Durabull.isConfigured() ? Durabull.getConfig().redisUrl : 'redis://localhost:6379');
+  constructor(redisUrl?: string, serializerType?: 'json' | 'base64') {
+    const url = redisUrl || 'redis://localhost:6379';
     this.redis = new Redis(url);
+    if (serializerType) {
+      this.serializer = getSerializer(serializerType);
+    }
   }
 
   /**
@@ -69,31 +72,73 @@ export class RedisStorage implements Storage {
 
   /**
    * Write complete history
+   * Optimized to only update cursor if events are managed via appendEvent
    */
   async writeHistory(id: string, hist: History): Promise<void> {
-    const key = this.getHistoryKey(id);
-    const data = this.serializer.serialize(hist);
-    await this.redis.set(key, data);
+    const eventsKey = this.getHistoryEventsKey(id);
+    const cursorKey = this.getHistoryCursorKey(id);
+
+    // If initializing or clearing
+    if (hist.events.length === 0) {
+      await this.redis.del(eventsKey);
+      await this.redis.set(cursorKey, 0);
+      return;
+    }
+
+    // Update cursor
+    await this.redis.set(cursorKey, hist.cursor);
+
+    const data = hist.events.map(e => this.serializer.serialize(e));
+
+    // Use Lua script for atomic check-and-set to avoid race conditions
+    const script = `
+      local key = KEYS[1]
+      local new_len = tonumber(ARGV[1])
+      local current_len = redis.call('LLEN', key)
+      
+      if current_len == new_len then
+        return 0
+      end
+      
+      redis.call('DEL', key)
+      if new_len > 0 then
+        redis.call('RPUSH', key, unpack(ARGV, 2))
+      end
+      return 1
+    `;
+
+    await this.redis.eval(script, 1, eventsKey, data.length, ...data);
   }
 
   /**
    * Read history
    */
   async readHistory(id: string): Promise<History | null> {
-    const key = this.getHistoryKey(id);
-    const data = await this.redis.get(key);
-    if (!data) return null;
-    return this.serializer.deserialize<History>(data);
+    const eventsKey = this.getHistoryEventsKey(id);
+    const cursorKey = this.getHistoryCursorKey(id);
+
+    const [eventsData, cursorData] = await Promise.all([
+      this.redis.lrange(eventsKey, 0, -1),
+      this.redis.get(cursorKey)
+    ]);
+
+    if (eventsData.length === 0 && !cursorData) {
+      return null;
+    }
+
+    const events = eventsData.map(item => this.serializer.deserialize<HistoryEvent>(item));
+    const cursor = cursorData ? parseInt(cursorData, 10) : 0;
+
+    return { events, cursor };
   }
 
   /**
    * Append event to history (optimized)
    */
   async appendEvent(id: string, ev: HistoryEvent): Promise<void> {
-    // Read, append, write pattern (could use Lua script for atomicity)
-    const hist = await this.readHistory(id) || { events: [], cursor: 0 };
-    hist.events.push(ev);
-    await this.writeHistory(id, hist);
+    const key = this.getHistoryEventsKey(id);
+    const data = this.serializer.serialize(ev);
+    await this.redis.rpush(key, data);
   }
 
   /**
@@ -181,13 +226,16 @@ export class RedisStorage implements Storage {
     await this.redis.quit();
   }
 
-  // Key builders
-  private getRecordKey(id: string): string {
-    return `durabull:wf:${id}:record`;
+  private getHistoryEventsKey(id: string): string {
+    return `durabull:wf:${id}:history:events`;
   }
 
-  private getHistoryKey(id: string): string {
-    return `durabull:wf:${id}:history`;
+  private getHistoryCursorKey(id: string): string {
+    return `durabull:wf:${id}:history:cursor`;
+  }
+
+  private getRecordKey(id: string): string {
+    return `durabull:wf:${id}:record`;
   }
 
   private getSignalsKey(id: string): string {
@@ -217,7 +265,10 @@ let storageInstance: Storage | null = null;
  */
 export function getStorage(): Storage {
   if (!storageInstance) {
-    storageInstance = new RedisStorage();
+    const instance = Durabull.getActive();
+    const redisUrl = instance?.getConfig().redisUrl || 'redis://localhost:6379';
+    const serializer = instance?.getConfig().serializer || 'json';
+    storageInstance = new RedisStorage(redisUrl, serializer);
   }
   return storageInstance;
 }
@@ -227,4 +278,14 @@ export function getStorage(): Storage {
  */
 export function setStorage(storage: Storage): void {
   storageInstance = storage;
+}
+
+/**
+ * Close storage connection
+ */
+export async function closeStorage(): Promise<void> {
+  if (storageInstance && storageInstance instanceof RedisStorage) {
+    await storageInstance.close();
+    storageInstance = null;
+  }
 }

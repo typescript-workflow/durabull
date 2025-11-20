@@ -1,5 +1,4 @@
-import { Durabull } from '../config/global';
-import type { DurabullLogger } from '../config/global';
+import { Durabull, DurabullLogger } from '../config/global';
 
 const noop = () => {
   /* noop */
@@ -10,6 +9,16 @@ export interface Logger {
   warn: (...args: unknown[]) => void;
   error: (...args: unknown[]) => void;
   debug: (...args: unknown[]) => void;
+}
+
+export interface StructuredLogContext {
+  workflowId?: string;
+  workflowName?: string;
+  activityId?: string;
+  activityName?: string;
+  phase?: string;
+  attempt?: number;
+  [key: string]: unknown;
 }
 
 const noopLogger: Logger = {
@@ -40,11 +49,55 @@ const normalize = (logger?: DurabullLogger): Logger => {
   };
 };
 
-export function getLogger(): Logger {
-  if (!Durabull.isConfigured()) {
-    return noopLogger;
-  }
+const consoleLogger: Logger = {
+  info: console.log.bind(console),
+  warn: console.warn.bind(console),
+  error: console.error.bind(console),
+  debug: console.debug.bind(console),
+};
 
-  const config = Durabull.getConfig();
-  return normalize(config.logger);
+export function getLogger(): Logger {
+  const instance = Durabull.getActive();
+  if (instance) {
+    return createLoggerFromConfig(instance.getConfig().logger);
+  }
+  return consoleLogger;
+}
+
+export function createLoggerFromConfig(logger?: DurabullLogger): Logger {
+  return normalize(logger);
+}
+
+/**
+ * Create a structured logger with context
+ */
+export function createStructuredLogger(context: StructuredLogContext): Logger {
+  const baseLogger = getLogger();
+
+  const formatMessage = (...args: unknown[]): unknown[] => {
+    const contextStr = Object.entries(context)
+      .filter(([_, value]) => value !== undefined)
+      .map(([key, value]) => `${key}=${value}`)
+      .join(' ');
+    
+    const message = args.length > 0 && typeof args[0] === 'string' ? args[0] : '';
+    const rest = args.length > 1 ? args.slice(1) : [];
+    
+    return [`[${contextStr}] ${message}`, ...rest];
+  };
+
+  return {
+    info: (...args: unknown[]) => {
+      baseLogger.info(...formatMessage(...args));
+    },
+    warn: (...args: unknown[]) => {
+      baseLogger.warn(...formatMessage(...args));
+    },
+    error: (...args: unknown[]) => {
+      baseLogger.error(...formatMessage(...args));
+    },
+    debug: (...args: unknown[]) => {
+      baseLogger.debug(...formatMessage(...args));
+    },
+  };
 }

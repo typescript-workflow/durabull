@@ -35,16 +35,35 @@ pnpm add durabull bullmq ioredis
 ```typescript
 import { Durabull } from 'durabull';
 
-Durabull.configure({
+const durabull = new Durabull({
   redisUrl: process.env.REDIS_URL ?? 'redis://127.0.0.1:6379',
   queues: {
-    workflow: 'durabull:workflow',
-    activity: 'durabull:activity',
+    workflow: 'durabull-workflow',
+    activity: 'durabull-activity',
   },
   serializer: 'json',
   pruneAge: '30 days',
+  // Optional: Queue routing for multi-tenant support
+  // The context object is passed from WorkflowStub.make(WorkflowClass, { context: { ... } })
+  queueRouter: (workflowName, context) => {
+    const tenant = context?.tenantId;
+    return tenant ? {
+      workflow: `tenant-${tenant}-workflow`,
+      activity: `tenant-${tenant}-activity`,
+    } : undefined;
+  },
+  // Optional: Lifecycle hooks for observability
+  lifecycleHooks: {
+    workflow: {
+      onStart: async (id, name, args) => console.log(`Workflow ${name} started`),
+      onComplete: async (id, name, output) => console.log(`Workflow ${name} completed`),
+      onFailed: async (id, name, error) => console.error(`Workflow ${name} failed`, error),
+    },
+  },
   // logger: optional structured logger with info/warn/error/debug methods
 });
+
+durabull.setActive();
 ```
 
 ### 3. Create an Activity
@@ -88,6 +107,32 @@ await wf.start('World');
 console.log(await wf.output()); // "Hello, World!"
 ```
 
+### 🪝 Webhooks
+
+Expose workflows via HTTP using `createWebhookRouter`.
+
+```typescript
+import { createWebhookRouter, TokenAuthStrategy } from 'durabull';
+import { GreetingWorkflow } from './GreetingWorkflow';
+
+const router = createWebhookRouter({
+  authStrategy: new TokenAuthStrategy('my-secret-token'),
+});
+
+router.registerWebhookWorkflow('greeting', GreetingWorkflow);
+
+// Use with Express/Fastify/etc.
+app.post('/webhooks/*', async (req, res) => {
+  const response = await router.handle({
+    method: req.method,
+    path: req.path,
+    headers: req.headers,
+    body: req.body,
+  });
+  res.status(response.statusCode).send(response.body);
+});
+```
+
 ---
 
 ## 🧠 Why Durabull?
@@ -101,6 +146,7 @@ console.log(await wf.output()); // "Hello, World!"
 | 🧵 **Saga & Compensation**       | Built-in support for distributed transactions.                           |
 | ⏱ **Timers & Await**             | Durable timers via `WorkflowStub.timer()` and `WorkflowStub.await()`.    |
 | 🩺 **Observability**             | Full event history, heartbeats, and pruning controls.                    |
+| 🪝 **Webhooks**                  | Trigger workflows and signals via HTTP with pluggable auth.              |
 
 ---
 
@@ -157,35 +203,6 @@ npm run example:greeting          # Basic workflow + activity
 
 ---
 
-## 🧪 Testing
-
-Durabull ships with a purpose-built `TestKit`:
-
-```typescript
-import { TestKit, WorkflowStub } from 'durabull/test';
-import { GreetingWorkflow } from '../workflows/GreetingWorkflow';
-import { SayHello } from '../activities/SayHello';
-
-it('greets users', async () => {
-  TestKit.fake();
-  TestKit.mock(SayHello, 'Hi!');
-
-  const wf = await WorkflowStub.make(GreetingWorkflow);
-  await wf.start('world');
-
-  expect(await wf.output()).toBe('Hi!');
-  TestKit.assertDispatched(SayHello, 1);
-
-  TestKit.restore();
-});
-```
-
-✅ Mock activities
-✅ Fake Redis + BullMQ
-✅ Time travel (`TestKit.travel()`)
-✅ Deterministic replay
-
----
 
 ## 🧭 Documentation
 
@@ -211,9 +228,3 @@ We welcome contributions!
 
 **Durabull** is open-source software licensed under the **[MIT License](./LICENSE)**.
 © 2025 Durabull contributors.
-
----
-
-<p align="center">
-  <sub>Built with ❤️  for the TypeScript workflow community — inspired by Laravel Workflow & Temporal.</sub>
-</p>

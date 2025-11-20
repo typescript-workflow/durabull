@@ -10,6 +10,7 @@ export interface ActivityContext {
   activityId: string;
   attempt: number;
   heartbeat: () => void | Promise<void>;
+  signal?: AbortSignal;
 }
 
 export abstract class Activity<TArgs extends unknown[] = unknown[], TResult = unknown> {
@@ -41,6 +42,10 @@ export abstract class Activity<TArgs extends unknown[] = unknown[], TResult = un
     return this.context.workflowId;
   }
 
+  protected get signal(): AbortSignal | undefined {
+    return this.context?.signal;
+  }
+
   _setContext(context: ActivityContext) {
     this.context = context;
     this.lastHeartbeat = Date.now();
@@ -64,7 +69,22 @@ export abstract class Activity<TArgs extends unknown[] = unknown[], TResult = un
         }
 
         if (this.timeout && this.timeout > 0) {
-          return await this._executeWithTimeout(this.timeout * 1000, ...args);
+          const timeoutMs = this.timeout * 1000;
+          return await new Promise<TResult>((resolve, reject) => {
+            const timer = setTimeout(() => {
+              reject(new Error(`Activity timeout after ${timeoutMs}ms`));
+            }, timeoutMs);
+
+            this.execute(...args)
+              .then(result => {
+                clearTimeout(timer);
+                resolve(result);
+              })
+              .catch(error => {
+                clearTimeout(timer);
+                reject(error);
+              });
+          });
         }
 
         return await this.execute(...args);
@@ -90,28 +110,5 @@ export abstract class Activity<TArgs extends unknown[] = unknown[], TResult = un
     }
 
     throw lastError || new Error('Activity execution failed');
-  }
-
-  private async _executeWithTimeout(timeoutMs: number, ...args: TArgs): Promise<TResult> {
-    return await new Promise<TResult>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        clearTimeout(timer);
-        reject(new Error(`Activity timeout after ${timeoutMs}ms`));
-      }, timeoutMs);
-
-      const finalize = () => {
-        clearTimeout(timer);
-      };
-
-      this.execute(...args)
-        .then(result => {
-          finalize();
-          resolve(result);
-        })
-        .catch(error => {
-          finalize();
-          reject(error);
-        });
-    });
   }
 }

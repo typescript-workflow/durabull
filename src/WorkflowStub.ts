@@ -1,429 +1,256 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
-/* eslint-disable @typescript-eslint/no-var-requires */
 /**
- * WorkflowStub - interface for controlling and executing workflows
+ * WorkflowStub - interface for controlling and executing workflows (Durable Mode Only)
  */
 
 import { Workflow } from './Workflow';
-import { getSignalMethods, getQueryMethods } from './decorators';
+import { getQueryMethods } from './decorators';
 import { getStorage } from './runtime/storage';
 import { getQueues } from './queues';
-import { generateWorkflowId, generateTimerId, generateSideEffectId } from './runtime/ids';
+import { generateWorkflowId, generateSideEffectId, generateActivityId, generateTimerId } from './runtime/ids';
 import { WorkflowRecord, WorkflowStatus } from './runtime/history';
+import { Durabull } from './config/global';
+import { createLoggerFromConfig } from './runtime/logger';
+import { replayWorkflow } from './runtime/replayer';
+import { WorkflowWaitError, WorkflowContinueAsNewError } from './errors';
+import { getWorkflowContext, getVirtualTimestamp, runInWorkflowContext, WorkflowExecutionContext } from './runtime/context';
 
 export { WorkflowStatus } from './runtime/history';
+export { WorkflowWaitError, WorkflowContinueAsNewError } from './errors';
 
-// Keep in-memory polling snappy so tests and local runs complete quickly.
-const WAIT_POLL_INTERVAL_MS = 10;
-
-const CONTINUE_AS_NEW_SYMBOL = Symbol('WorkflowContinueAsNew');
-
-interface ContinueAsNewRequest {
-  [CONTINUE_AS_NEW_SYMBOL]: true;
-  args: any[];
+export interface WorkflowDispatchOptions {
+  id?: string;
+  queue?: string;
+  queueContext?: Record<string, unknown>;
 }
 
-const getVirtualTimestamp = (workflowId?: string): number => {
-  try {
-    const testKitModule = require('./test/TestKit') as typeof import('./test/TestKit');
-    const date = testKitModule.TestKit.now(workflowId);
-    const ts = date.getTime();
-    if (!Number.isNaN(ts)) {
-      return ts;
+/**
+ * WorkflowHandle - interface for interacting with a workflow instance
+ */
+export class WorkflowHandle<TArgs extends any[] = any[], TResult = any> {
+  constructor(
+    private workflowId: string,
+    private workflowName: string
+  ) {}
+
+  id(): string {
+    return this.workflowId;
+  }
+
+  async start(...args: TArgs): Promise<void> {
+    const storage = getStorage();
+    const queues = getQueues();
+    const instance = Durabull.getActive();
+    
+    if (!instance) {
+      throw new Error('No active Durabull instance');
     }
-  } catch (_error) {
-    // TestKit is optional at runtime; fall back to real time when unavailable
+    
+    const config = instance.getConfig();
+
+    const record: WorkflowRecord = {
+      id: this.workflowId,
+      class: this.workflowName,
+      status: 'pending',
+      args,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    };
+    
+    await storage.writeRecord(record);
+    await storage.writeHistory(this.workflowId, { events: [], cursor: 0 });
+
+    // Call onStart lifecycle hook
+    if (config.lifecycleHooks?.workflow?.onStart) {
+      try {
+        await config.lifecycleHooks.workflow.onStart(this.workflowId, this.workflowName, args);
+      } catch (error) {
+        const logger = createLoggerFromConfig(config.logger);
+        logger.error('Workflow onStart hook failed', error);
+      }
+    }
+
+    await queues.workflow.add('start', {
+      workflowId: this.workflowId,
+      workflowName: this.workflowName,
+      args,
+      isResume: false,
+    });
   }
 
-  return Date.now();
-};
-
-function isPromiseLike<T>(value: unknown): value is PromiseLike<T> {
-  return Boolean(value) && typeof (value as any).then === 'function';
-}
-
-function isContinueAsNewRequest(value: unknown): value is ContinueAsNewRequest {
-  return Boolean(value && (value as any)[CONTINUE_AS_NEW_SYMBOL]);
-}
-
-interface WorkflowExecutionContext {
-  workflowId: string;
-  workflow: Workflow<any, any>;
-  record: WorkflowRecord;
-  isResume: boolean;
-  clockCursor: number;
-}
-
-export class WorkflowWaitError extends Error {
-  constructor(public readonly workflowId: string) {
-    super('Workflow waiting');
-    this.name = 'WorkflowWaitError';
+  async status(): Promise<WorkflowStatus> {
+    const storage = getStorage();
+    const record = await storage.readRecord(this.workflowId);
+    if (!record) {
+      return 'pending';
+    }
+    return record.status;
   }
-}
 
-export class WorkflowContinueAsNewError extends Error {
-  constructor(public readonly workflowId: string) {
-    super('Workflow continued as new');
-    this.name = 'WorkflowContinueAsNewError';
+  async output(): Promise<TResult> {
+    const storage = getStorage();
+    const record = await storage.readRecord(this.workflowId);
+
+    if (!record) {
+      throw new Error(`Workflow ${this.workflowId} not found`);
+    }
+
+    if (record.status === 'failed') {
+      throw new Error(record.error?.message || 'Workflow failed');
+    }
+
+    if (record.status !== 'completed') {
+      throw new Error(`Workflow is ${record.status}, not completed`);
+    }
+
+    return record.output as TResult;
+  }
+
+  /**
+   * Get query method proxy - queries access workflow state from storage
+   */
+  query<T extends Record<string, (...args: any[]) => any>>(WorkflowClass: new () => Workflow<any, any>): T {
+    const queryMethods = getQueryMethods(WorkflowClass);
+    const proxy: any = {};
+
+    for (const methodName of queryMethods) {
+      proxy[methodName] = async (...args: any[]) => {
+        try {
+          // Replay workflow to get current state
+          const { workflow } = await replayWorkflow(this.workflowId, WorkflowClass);
+          
+          // Execute query on the replayed instance
+          return (workflow as any)[methodName](...args);
+        } catch (error) {
+          const instance = Durabull.getActive();
+          const logger = createLoggerFromConfig(instance?.getConfig().logger);
+          logger.error('Query execution failed', error);
+          throw error;
+        }
+      };
+    }
+
+    return proxy as T;
   }
 }
 
 /**
- * Handle for an executing workflow
+ * WorkflowStub - Static methods for workflow control
  */
-export class WorkflowHandle<T extends Workflow<any, any> = Workflow<any, any>> {
-  private _id: string;
-  private _status: WorkflowStatus = 'created';
-  private _output: any = undefined;
-  private _error: Error | undefined;
-  private workflow: T;
-  private generator: AsyncGenerator<any, any, any> | null = null;
-
-  constructor(workflow: T, id?: string) {
-    this.workflow = workflow;
-    this._id = id || generateWorkflowId();
-  }
-
-  id(): string {
-    return this._id;
-  }
-
-  async start(...args: any[]): Promise<void> {
-    if (this._status !== 'created') {
-      throw new Error(`Workflow ${this._id} already started`);
-    }
-
-    const { Durabull } = require('./config/global');
-    const isDurable = Durabull.isConfigured() && !Durabull.getConfig().testMode;
-
-    if (isDurable) {
-      const storage = getStorage();
-      const queues = getQueues();
-
-      const record: WorkflowRecord = {
-        id: this._id,
-        class: this.workflow.constructor.name,
-        status: 'pending',
-        args,
-        createdAt: Date.now(),
-        updatedAt: Date.now(),
-      };
-      
-      await storage.writeRecord(record);
-      await storage.writeHistory(this._id, { events: [], cursor: 0 });
-
-      await queues.workflow.add('start', {
-        workflowId: this._id,
-        args,
-        isResume: false,
-      });
-
-      this._status = 'pending';
-    } else {
-      this._status = 'running';
-      
-      try {
-        this.generator = this.workflow.execute(...args);
-        
-        let result = await this.generator.next();
-        
-        while (!result.done) {
-          if (isPromiseLike(result.value)) {
-            const resolved = await result.value;
-
-            if (isContinueAsNewRequest(resolved)) {
-              this._restart(resolved.args);
-              if (!this.generator) {
-                throw new Error('Workflow generator missing after continue-as-new');
-              }
-              result = await this.generator.next();
-              continue;
-            }
-
-            if (!this.generator) {
-              throw new Error('Workflow generator missing during execution');
-            }
-            result = await this.generator.next(resolved);
-            continue;
-          }
-
-          if (isContinueAsNewRequest(result.value)) {
-            this._restart(result.value.args);
-            if (!this.generator) {
-              throw new Error('Workflow generator missing after continue-as-new');
-            }
-            result = await this.generator.next();
-            continue;
-          }
-
-          if (!this.generator) {
-            throw new Error('Workflow generator missing during execution');
-          }
-          result = await this.generator.next(result.value);
-        }
-        
-        this._output = result.value;
-        this._status = 'completed';
-      } catch (error) {
-        this._error = error as Error;
-        this._status = 'failed';
-        throw error;
-      }
-    }
-  }
-
-  async resume(): Promise<void> {
-    const { Durabull } = require('./config/global');
-    const isDurable = Durabull.isConfigured() && !Durabull.getConfig().testMode;
-
-    if (isDurable) {
-      const queues = getQueues();
-      const storage = getStorage();
-      const record = await storage.readRecord(this._id);
-      await queues.workflow.add('resume', {
-        workflowId: this._id,
-        args: record?.args ?? [],
-        isResume: true,
-      });
-    } else {
-      if (!this.generator) {
-        throw new Error('Workflow not started');
-      }
-
-      if (this._status === 'completed' || this._status === 'failed') {
-        return;
-      }
-
-      this._status = 'running';
-
-      try {
-        let result = await this.generator.next();
-        
-        while (!result.done) {
-          if (isPromiseLike(result.value)) {
-            const resolved = await result.value;
-
-            if (isContinueAsNewRequest(resolved)) {
-              this._restart(resolved.args);
-              if (!this.generator) {
-                throw new Error('Workflow generator missing after continue-as-new');
-              }
-              result = await this.generator.next();
-              continue;
-            }
-
-            result = await this.generator.next(resolved);
-            continue;
-          }
-
-          if (isContinueAsNewRequest(result.value)) {
-            this._restart(result.value.args);
-            if (!this.generator) {
-              throw new Error('Workflow generator missing after continue-as-new');
-            }
-            result = await this.generator.next();
-            continue;
-          }
-
-          result = await this.generator.next(result.value);
-        }
-        
-        this._output = result.value;
-        this._status = 'completed';
-      } catch (error) {
-        this._error = error as Error;
-        this._status = 'failed';
-        throw error;
-      }
-    }
-  }
-
-  async running(): Promise<boolean> {
-    const { Durabull } = require('./config/global');
-    const isDurable = Durabull.isConfigured() && !Durabull.getConfig().testMode;
-
-    if (isDurable) {
-      const storage = getStorage();
-      const record = await storage.readRecord(this._id);
-      if (!record) return false;
-      this._status = record.status;
-    }
-    
-    return this._status === 'running' || this._status === 'waiting' || this._status === 'pending';
-  }
-
-  async status(): Promise<WorkflowStatus> {
-    const { Durabull } = require('./config/global');
-    const isDurable = Durabull.isConfigured() && !Durabull.getConfig().testMode;
-
-    if (isDurable) {
-      const storage = getStorage();
-      const record = await storage.readRecord(this._id);
-      if (!record) {
-        throw new Error(`Workflow ${this._id} not found`);
-      }
-      this._status = record.status;
-    }
-    
-    return this._status;
-  }
-
-  async output<TResult = any>(): Promise<TResult> {
-    const { Durabull } = require('./config/global');
-    const isDurable = Durabull.isConfigured() && !Durabull.getConfig().testMode;
-
-    if (isDurable) {
-      const storage = getStorage();
-      const record = await storage.readRecord(this._id);
-      if (!record) {
-        throw new Error(`Workflow ${this._id} not found`);
-      }
-      
-      this._status = record.status;
-      
-      if (this._status === 'failed') {
-  const message = record.error?.message ?? 'Workflow failed';
-  this._error = new Error(message);
-        throw this._error;
-      }
-      
-      if (this._status !== 'completed') {
-        throw new Error('Workflow not completed yet');
-      }
-      
-      this._output = record.output;
-    } else {
-      if (this._status === 'failed') {
-        throw this._error;
-      }
-      
-      if (this._status !== 'completed') {
-        throw new Error('Workflow not completed yet');
-      }
-    }
-    
-    return this._output;
-  }
-
-  _getWorkflow(): T {
-    return this.workflow;
-  }
-
-  private _restart(args: any[]): void {
-    const WorkflowClass = this.workflow.constructor as new () => T;
-    this.workflow = new WorkflowClass();
-    this.generator = this.workflow.execute(...args);
-    this._error = undefined;
-  }
-}
-
-function createWorkflowProxy<T extends Workflow<any, any>>(handle: WorkflowHandle<T>): any {
-  const workflow = handle._getWorkflow();
-  const signalMethods = getSignalMethods(workflow.constructor);
-  const queryMethods = getQueryMethods(workflow.constructor);
-
-  return new Proxy(handle, {
-    get(target, prop) {
-      if (prop in target) {
-        return (target as any)[prop];
-      }
-
-      const propStr = prop.toString();
-
-      if (signalMethods.includes(propStr)) {
-        return async (...args: any[]) => {
-          const currentWorkflow = target._getWorkflow();
-          (currentWorkflow as any)[propStr](...args);
-          
-          const { Durabull } = require('./config/global');
-          const isDurable = Durabull.isConfigured() && !Durabull.getConfig().testMode;
-          if (isDurable) {
-            await WorkflowStub.sendSignal(target.id(), propStr, args);
-          }
-        };
-      }
-
-      if (queryMethods.includes(propStr)) {
-        return (...args: any[]) => {
-          const currentWorkflow = target._getWorkflow();
-          return (currentWorkflow as any)[propStr](...args);
-        };
-      }
-
-      return undefined;
-    },
-  });
-}
-
 export class WorkflowStub {
-  private static _context: WorkflowExecutionContext | null = null;
+  /**
+   * Create a new workflow handle
+   */
+  static async make<T extends Workflow<TArgs, TResult>, TArgs extends any[] = any[], TResult = any>(
+    workflowClassOrName: (new () => T) | string,
+    options?: WorkflowDispatchOptions
+  ): Promise<WorkflowHandle<TArgs, TResult>> {
+    const instance = Durabull.getActive();
+    
+    if (!instance) {
+      throw new Error('No active Durabull instance. Create an instance and call setActive()');
+    }
+    
+    let workflowName: string;
 
-  static _setContext(context: WorkflowExecutionContext | null) {
-    if (context) {
-      WorkflowStub._context = {
-        ...context,
-        clockCursor: context.clockCursor ?? 0,
-      };
-      return;
+    if (typeof workflowClassOrName === 'string') {
+      workflowName = workflowClassOrName;
+      const resolved = instance.resolveWorkflow(workflowName);
+      if (!resolved) {
+        throw new Error(`Workflow "${workflowName}" not registered`);
+      }
+    } else {
+      workflowName = workflowClassOrName.name;
     }
 
-    WorkflowStub._context = null;
+    const id = options?.id || generateWorkflowId();
+    return new WorkflowHandle<TArgs, TResult>(id, workflowName);
   }
 
-  static _getContext(): WorkflowExecutionContext | null {
-    return WorkflowStub._context;
-  }
-
-  static async make<T extends Workflow<any, any>>(
-    WorkflowClass: new () => T,
-    id?: string
-  ): Promise<WorkflowHandle<T> & T> {
-    const workflow = new WorkflowClass();
-    const handle = new WorkflowHandle(workflow, id);
-    return createWorkflowProxy(handle) as WorkflowHandle<T> & T;
-  }
-
-  static async load<T extends Workflow<any, any>>(
-    id: string,
-    WorkflowClass?: new () => T
-  ): Promise<WorkflowHandle<T> & T> {
+  /**
+   * Load an existing workflow by ID
+   */
+  static async load<TArgs extends any[] = any[], TResult = any>(
+    id: string
+  ): Promise<WorkflowHandle<TArgs, TResult>> {
     const storage = getStorage();
     const record = await storage.readRecord(id);
-    
+
     if (!record) {
       throw new Error(`Workflow ${id} not found`);
     }
 
-    if (!WorkflowClass) {
-      throw new Error('WorkflowClass must be provided for load (registry not yet implemented)');
-    }
-
-    const workflow = new WorkflowClass();
-    const handle = new WorkflowHandle(workflow, id);
-    handle['_status'] = record.status;
-    handle['_output'] = record.output;
-    if (record.error) {
-  handle['_error'] = new Error(record.error?.message ?? 'Workflow failed');
-    }
-    
-    return createWorkflowProxy(handle) as WorkflowHandle<T> & T;
+    return new WorkflowHandle<TArgs, TResult>(id, record.class);
   }
 
-  static async timer(secondsOrString: number | string): Promise<void> {
-    const seconds = typeof secondsOrString === 'string' 
-      ? parseInt(secondsOrString, 10) 
-      : secondsOrString;
+  /**
+   * Send a signal to a workflow
+   */
+  static async sendSignal(workflowId: string, signalName: string, payload: any[]): Promise<void> {
+    const storage = getStorage();
+    const queues = getQueues();
+
+    await storage.pushSignal(workflowId, {
+      name: signalName,
+      payload,
+      ts: Date.now(),
+    });
+
+    await queues.workflow.add('resume', {
+      workflowId,
+      isResume: true,
+    });
+  }
+
+  /**
+   * Get current time (replay-safe for workflows)
+   */
+  static now(): Date {
+    const ctx = getWorkflowContext();
+    if (!ctx) {
+      return new Date();
+    }
+
+    const ts = getVirtualTimestamp(ctx.workflowId);
+    return new Date(ts);
+  }
+
+  /**
+   * Sleep for a duration (workflow timer)
+   */
+  static async timer(durationSeconds: number | string): Promise<void> {
+    const seconds = typeof durationSeconds === 'string' 
+      ? parseInt(durationSeconds, 10) 
+      : durationSeconds;
     
-    const context = WorkflowStub._getContext();
-    if (!context) {
+    const ctx = getWorkflowContext();
+    if (!ctx) {
       await new Promise(resolve => setTimeout(resolve, seconds * 1000));
       return;
     }
 
-    const waiting = context.record.waiting;
-    if (waiting && waiting.type === 'await' && Date.now() >= waiting.resumeAt) {
-      context.record.waiting = undefined;
-      return;
+    const storage = getStorage();
+    const queues = getQueues();
+    const timerId = WorkflowStub._generateTimerId();
+    const history = ctx.history || await storage.readHistory(ctx.workflowId);
+
+    if (history && !ctx.eventIndex) {
+      ctx.eventIndex = new Map();
+      for (const event of history.events) {
+        if (event.id) {
+          ctx.eventIndex.set(`${event.type}:${event.id}`, event);
+        }
+      }
+    }
+
+    if (history) {
+      const firedEvent = ctx.eventIndex 
+        ? ctx.eventIndex.get(`timer-fired:${timerId}`)
+        : history.events.find((e) => e.type === 'timer-fired' && e.id === timerId);
+
+      if (firedEvent) {
+        return;
+      }
     }
 
     const delayMs = Math.max(0, seconds * 1000);
@@ -431,207 +258,213 @@ export class WorkflowStub {
       return;
     }
 
-    await WorkflowStub._scheduleWait({
-      type: 'await',
-      delayMs,
-    });
-    return;
+    const startedEvent = ctx.eventIndex
+      ? ctx.eventIndex.get(`timer-started:${timerId}`)
+      : history?.events.find((e) => e.type === 'timer-started' && e.id === timerId);
+
+    if (!startedEvent) {
+      const event = {
+        type: 'timer-started' as const,
+        id: timerId,
+        ts: Date.now(),
+        delay: seconds,
+      };
+      
+      await storage.appendEvent(ctx.workflowId, event);
+      
+      if (ctx.eventIndex) {
+        ctx.eventIndex.set(`timer-started:${timerId}`, event);
+      }
+      
+      const record = await storage.readRecord(ctx.workflowId);
+      if (record) {
+        record.status = 'waiting';
+        record.waiting = {
+          type: 'await',
+          resumeAt: Date.now() + seconds * 1000,
+        };
+        record.updatedAt = Date.now();
+        await storage.writeRecord(record);
+      }
+
+      await queues.workflow.add(
+        'resume',
+        {
+          workflowId: ctx.workflowId,
+          isResume: true,
+          timerId, // Pass timerId to worker
+        },
+        {
+          delay: seconds * 1000,
+        }
+      );
+    }
+
+    throw new WorkflowWaitError(`Timer ${timerId} waiting ${seconds}s`);
   }
 
-  private static async _scheduleWait(wait: { type: 'await' | 'awaitWithTimeout'; delayMs: number; deadline?: number }): Promise<never> {
-    const context = WorkflowStub._getContext();
-    if (!context) {
-      throw new Error('Cannot schedule workflow wait without active execution context');
+  /**
+   * Wait for a condition to become true
+   */
+  static async await(predicate: () => boolean): Promise<void> {
+    if (predicate()) {
+      return;
+    }
+
+    const ctx = getWorkflowContext();
+    if (!ctx) {
+      // Not in workflow context - poll
+      while (!predicate()) {
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
+      return;
     }
 
     const storage = getStorage();
     const queues = getQueues();
-    const record = (await storage.readRecord(context.workflowId)) || context.record;
-    if (!record) {
-      throw new Error(`Workflow ${context.workflowId} not found while scheduling wait`);
+    
+    // Update workflow to waiting status
+    const record = await storage.readRecord(ctx.workflowId);
+    if (record) {
+      record.status = 'waiting';
+      record.waiting = {
+        type: 'await',
+        resumeAt: Date.now() + 100, // Check again in 100ms
+      };
+      record.updatedAt = Date.now();
+      await storage.writeRecord(record);
     }
 
-    const now = Date.now();
-    record.status = 'waiting';
-    record.updatedAt = now;
-    record.waiting = {
-      type: wait.type,
-      resumeAt: now + wait.delayMs,
-      deadline: wait.deadline,
-    };
-
-    await storage.writeRecord(record);
-    context.record = record;
-
+    // Schedule resume
     await queues.workflow.add(
       'resume',
       {
-        workflowId: context.workflowId,
-        args: record.args ?? [],
+        workflowId: ctx.workflowId,
         isResume: true,
       },
       {
-        delay: wait.delayMs,
+        delay: 100,
       }
     );
 
-    throw new WorkflowWaitError(context.workflowId);
+    throw new WorkflowWaitError('Awaiting condition');
   }
 
-  static async await(predicate: () => boolean): Promise<void> {
-    if (predicate()) {
-      const context = WorkflowStub._getContext();
-      if (context) {
-        context.record.waiting = undefined;
-      }
-      return;
-    }
-
-    const context = WorkflowStub._getContext();
-    if (!context) {
-      while (!predicate()) {
-        await new Promise(resolve => setTimeout(resolve, WAIT_POLL_INTERVAL_MS));
-      }
-      return;
-    }
-
-    await WorkflowStub._scheduleWait({
-      type: 'await',
-      delayMs: WAIT_POLL_INTERVAL_MS,
-    });
-    return;
-  }
-
+  /**
+   * Wait for condition with timeout
+   */
   static async awaitWithTimeout(
-    secondsOrString: number | string,
+    durationSeconds: number | string,
     predicate: () => boolean
   ): Promise<boolean> {
-    const seconds = typeof secondsOrString === 'string'
-      ? parseInt(secondsOrString, 10)
-      : secondsOrString;
-    
     if (predicate()) {
-      const context = WorkflowStub._getContext();
-      if (context) {
-        context.record.waiting = undefined;
-      }
       return true;
     }
 
-    const context = WorkflowStub._getContext();
-    if (!context) {
-      const timeoutMs = seconds * 1000;
+    const seconds = typeof durationSeconds === 'string'
+      ? parseInt(durationSeconds, 10)
+      : durationSeconds;
+
+    const ctx = getWorkflowContext();
+    if (!ctx) {
+      // Not in workflow - use regular timeout
       const start = Date.now();
       while (!predicate()) {
-        if (Date.now() - start >= timeoutMs) {
+        if (Date.now() - start >= seconds * 1000) {
           return false;
         }
-        await new Promise(resolve => setTimeout(resolve, WAIT_POLL_INTERVAL_MS));
+        await new Promise(resolve => setTimeout(resolve, 100));
       }
       return true;
-    }
-
-    const now = Date.now();
-    const existingDeadline = context.record.waiting?.type === 'awaitWithTimeout'
-      ? context.record.waiting.deadline
-      : undefined;
-    const deadline = existingDeadline ?? now + seconds * 1000;
-
-    if (now >= deadline) {
-      context.record.waiting = undefined;
-      return false;
-    }
-
-    const delayMs = Math.min(WAIT_POLL_INTERVAL_MS, Math.max(0, deadline - now));
-
-    await WorkflowStub._scheduleWait({
-      type: 'awaitWithTimeout',
-      delayMs,
-      deadline,
-    });
-
-    return false;
-  }
-
-  static async sideEffect<T>(fn: () => T | Promise<T>): Promise<T> {
-    return await fn();
-  }
-
-  static async now(): Promise<Date> {
-    const context = WorkflowStub._getContext();
-    const timestamp = getVirtualTimestamp(context?.workflowId);
-
-    if (!context) {
-      return new Date(timestamp);
-    }
-
-    const cursor = context.clockCursor ?? 0;
-    const existing = context.record.clockEvents?.[cursor];
-
-    if (typeof existing === 'number' && !Number.isNaN(existing)) {
-      context.clockCursor = cursor + 1;
-      return new Date(existing);
-    }
-
-    const record = context.record;
-    if (!record.clockEvents) {
-      record.clockEvents = [];
-    }
-    record.clockEvents[cursor] = timestamp;
-    context.clockCursor = cursor + 1;
-
-    record.updatedAt = Date.now();
-    const storage = getStorage();
-    await storage.writeRecord(record);
-
-    return new Date(timestamp);
-  }
-
-  static async continueAsNew(..._args: any[]): Promise<any> {
-    const args = Array.from(_args);
-    const request: ContinueAsNewRequest = {
-      [CONTINUE_AS_NEW_SYMBOL]: true,
-      args,
-    };
-
-    const context = WorkflowStub._getContext();
-    if (!context) {
-      return request;
     }
 
     const storage = getStorage();
     const queues = getQueues();
-
-    const existingRecord = (await storage.readRecord(context.workflowId)) ?? context.record;
-    if (!existingRecord) {
-      throw new Error(`Workflow ${context.workflowId} not found for continue-as-new`);
+    const record = await storage.readRecord(ctx.workflowId);
+    
+    if (!record) {
+      return false;
     }
 
+    // Check if we've exceeded deadline
+    const existingDeadline = record.waiting?.type === 'awaitWithTimeout'
+      ? record.waiting.deadline
+      : undefined;
+    const deadline = existingDeadline ?? Date.now() + seconds * 1000;
+
+    if (Date.now() >= deadline) {
+      record.waiting = undefined;
+      await storage.writeRecord(record);
+      return false;
+    }
+
+    // Update to waiting
+    record.status = 'waiting';
+    record.waiting = {
+      type: 'awaitWithTimeout',
+      resumeAt: Date.now() + 100,
+      deadline,
+    };
+    record.updatedAt = Date.now();
+    await storage.writeRecord(record);
+
+    // Schedule resume
+    await queues.workflow.add(
+      'resume',
+      {
+        workflowId: ctx.workflowId,
+        isResume: true,
+      },
+      {
+        delay: 100,
+      }
+    );
+
+    throw new WorkflowWaitError('Awaiting with timeout');
+  }
+
+  /**
+   * Continue as new workflow
+   */
+  static async continueAsNew(...args: any[]): Promise<never> {
+    const ctx = getWorkflowContext();
+    if (!ctx) {
+      throw new Error('continueAsNew can only be called from within a workflow');
+    }
+
+    const storage = getStorage();
+    const queues = getQueues();
     const newWorkflowId = generateWorkflowId();
     const now = Date.now();
 
+    // Create new workflow record
     const newRecord: WorkflowRecord = {
       id: newWorkflowId,
-      class: existingRecord.class,
+      class: ctx.record.class,
       status: 'pending',
       args,
       createdAt: now,
       updatedAt: now,
-      continuedFrom: existingRecord.id,
+      continuedFrom: ctx.workflowId,
     };
 
     await storage.writeRecord(newRecord);
     await storage.writeHistory(newWorkflowId, { events: [], cursor: 0 });
 
-    existingRecord.status = 'continued';
-    existingRecord.continuedTo = newWorkflowId;
-    existingRecord.waiting = undefined;
-    existingRecord.updatedAt = now;
-    await storage.writeRecord(existingRecord);
-    context.record = existingRecord;
+    // Update current workflow
+    const currentRecord = await storage.readRecord(ctx.workflowId);
+    if (currentRecord) {
+      currentRecord.status = 'continued';
+      currentRecord.continuedTo = newWorkflowId;
+      currentRecord.waiting = undefined;
+      currentRecord.updatedAt = now;
+      await storage.writeRecord(currentRecord);
+    }
 
+    // Queue new workflow
     await queues.workflow.add('start', {
       workflowId: newWorkflowId,
+      workflowName: ctx.record.class,
       args,
       isResume: false,
     });
@@ -639,74 +472,175 @@ export class WorkflowStub {
     throw new WorkflowContinueAsNewError(newWorkflowId);
   }
 
-  static async child<TChild extends Workflow<any, any>>(
-    WorkflowClass: new () => TChild,
-    ...args: any[]
-  ): Promise<ChildWorkflowPromise<TChild>> {
-    const handle = await ChildWorkflowStub.make(WorkflowClass);
-    await handle.start(...args);
-    return new ChildWorkflowPromise(handle, args);
-  }
-
-  static async sendSignal(workflowId: string, name: string, payload: any[]): Promise<void> {
-    const storage = getStorage();
-    await storage.pushSignal(workflowId, {
-      name,
-      payload,
-      ts: Date.now(),
-    });
-
-    const record = await storage.readRecord(workflowId);
-    if (record) {
-      record.status = 'pending';
-      record.updatedAt = Date.now();
-      await storage.writeRecord(record);
+  /**
+   * Execute side effect (non-deterministic code)
+   */
+  static async sideEffect<T>(fn: () => T | Promise<T>): Promise<T> {
+    const ctx = getWorkflowContext();
+    if (!ctx) {
+      // Not in workflow - just execute
+      return await fn();
     }
 
-    const queues = getQueues();
-    await queues.workflow.add('resume', {
-      workflowId,
-      args: record?.args ?? [],
-      isResume: true,
+    const storage = getStorage();
+    const sideEffectId = WorkflowStub._generateSideEffectId();
+    const history = ctx.history || await storage.readHistory(ctx.workflowId);
+
+    // Check if side effect already executed (replay)
+    if (history) {
+      const existingEffect = history.events.find(
+        (e) => e.type === 'sideEffect' && e.id === sideEffectId
+      );
+      if (existingEffect && existingEffect.type === 'sideEffect') {
+        return existingEffect.value as T;
+      }
+    }
+
+    // Execute side effect
+    const result = await fn();
+
+    // Record result
+    await storage.appendEvent(ctx.workflowId, {
+      type: 'sideEffect',
+      id: sideEffectId,
+      ts: Date.now(),
+      value: result,
     });
+
+    return result;
   }
 
-  static generateTimerId(): string {
-    return generateTimerId();
+  /**
+   * Execute child workflow
+   */
+  static async child<TResult = any>(
+    workflowClassOrName: (new () => Workflow<any, any>) | string,
+    ...args: any[]
+  ): Promise<TResult> {
+    const ctx = getWorkflowContext();
+    if (!ctx) {
+      throw new Error('child workflows can only be called from within a workflow');
+    }
+
+    const storage = getStorage();
+    const queues = getQueues();
+    const childId = WorkflowStub._generateChildWorkflowId();
+    const history = ctx.history || await storage.readHistory(ctx.workflowId);
+
+    // Check if child already completed (replay)
+    if (history) {
+      const existingChild = history.events.find(
+        (e) => e.type === 'child' && e.id === childId
+      );
+      if (existingChild && existingChild.type === 'child') {
+        if (existingChild.error) {
+          throw new Error(existingChild.error.message || 'Child workflow failed');
+        }
+        return existingChild.result as TResult;
+      }
+    }
+
+    // Determine workflow name
+    let workflowName: string;
+    if (typeof workflowClassOrName === 'string') {
+      workflowName = workflowClassOrName;
+    } else {
+      workflowName = workflowClassOrName.name;
+    }
+
+    // Create and start child workflow
+    const childRecord: WorkflowRecord = {
+      id: childId,
+      class: workflowName,
+      status: 'pending',
+      args,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    };
+
+    await storage.writeRecord(childRecord);
+    await storage.writeHistory(childId, { events: [], cursor: 0 });
+    await storage.addChild(ctx.workflowId, childId);
+
+    // Queue child workflow
+    await queues.workflow.add('start', {
+      workflowId: childId,
+      workflowName,
+      args,
+      isResume: false,
+    });
+
+    // Wait for child to complete
+    throw new WorkflowWaitError(`Waiting for child workflow ${childId}`);
   }
 
-  static generateSideEffectId(): string {
-    return generateSideEffectId();
-  }
-}
-
-export class ChildWorkflowPromise<TChild extends Workflow<any, any>> implements PromiseLike<any> {
-  constructor(
-    private handle: WorkflowHandle<TChild>,
-    private args: any[]
-  ) {}
-
-  then<TResult1 = any, TResult2 = never>(
-    onfulfilled?: ((value: any) => TResult1 | PromiseLike<TResult1>) | undefined | null,
-    onrejected?: ((reason: any) => TResult2 | PromiseLike<TResult2>) | undefined | null
-  ): PromiseLike<TResult1 | TResult2> {
-    return this.handle.output().then(onfulfilled, onrejected);
+  /**
+   * Get workflow execution context (internal use)
+   */
+  static _getContext(): WorkflowExecutionContext | null {
+    return getWorkflowContext() || null;
   }
 
-  async start(): Promise<void> {
-    await this.handle.start(...this.args);
+  /**
+   * Generate a deterministic ID for a side effect
+   */
+  static _generateSideEffectId(): string {
+    const ctx = getWorkflowContext();
+    if (!ctx) {
+      return generateSideEffectId();
+    }
+
+    const id = `se-${ctx.sideEffectCursor}`;
+    ctx.sideEffectCursor++;
+    return id;
   }
 
-  async output<TResult = any>(): Promise<TResult> {
-    return await this.handle.output<TResult>();
-  }
-}
+  /**
+   * Generate a deterministic ID for a child workflow
+   */
+  static _generateChildWorkflowId(): string {
+    const ctx = getWorkflowContext();
+    if (!ctx) {
+      return generateWorkflowId();
+    }
 
-export class ChildWorkflowStub {
-  static async make<T extends Workflow<any, any>>(
-    WorkflowClass: new () => T,
-    id?: string
-  ): Promise<WorkflowHandle<T> & T> {
-    return WorkflowStub.make(WorkflowClass, id);
+    const id = `child-${ctx.childWorkflowCursor}`;
+    ctx.childWorkflowCursor++;
+    return id;
+  }
+
+  /**
+   * Generate a deterministic ID for an activity
+   */
+  static _generateActivityId(): string {
+    const ctx = getWorkflowContext();
+    if (!ctx) {
+      return generateActivityId();
+    }
+    
+    const id = `act-${ctx.activityCursor}`;
+    ctx.activityCursor++;
+    return id;
+  }
+
+  /**
+   * Generate a deterministic ID for a timer
+   */
+  static _generateTimerId(): string {
+    const ctx = getWorkflowContext();
+    if (!ctx) {
+      return generateTimerId();
+    }
+    
+    const id = `timer-${ctx.timerCursor}`;
+    ctx.timerCursor++;
+    return id;
+  }
+
+  /**
+   * Run code in workflow context (internal use by workers)
+   */
+  static _run<T>(ctx: WorkflowExecutionContext, fn: () => T): T {
+    return runInWorkflowContext(ctx, fn);
   }
 }

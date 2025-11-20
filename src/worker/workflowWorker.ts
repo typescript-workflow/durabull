@@ -1,120 +1,98 @@
-/* eslint-disable @typescript-eslint/no-explicit-any */
-/**
- * Workflow worker implementation
- * 
- * Logs are routed through the configurable Durabull logger hook for observability.
- */
-
 import { Worker, Job } from 'bullmq';
 import { Durabull } from '../config/global';
 import { getStorage } from '../runtime/storage';
-import { WorkflowRecord, HistoryEvent } from '../runtime/history';
 import { Redis } from 'ioredis';
-import { WorkflowStub, WorkflowWaitError, WorkflowContinueAsNewError } from '../WorkflowStub';
-import { getSignalMethods } from '../decorators';
-import { getLogger } from '../runtime/logger';
-
-/**
- * Workflow registry - maps class names to constructors
- */
-const workflowRegistry = new Map<string, new () => any>();
-
-/**
- * Register a workflow class
- */
-export function registerWorkflow(name: string, WorkflowClass: new () => any): void {
-  workflowRegistry.set(name, WorkflowClass);
-}
-
-/**
- * Resolve workflow class by name
- */
-export function resolveWorkflow(name: string): (new () => any) | null {
-  return workflowRegistry.get(name) || null;
-}
-
-const isPromiseLike = <T = unknown>(value: unknown): value is PromiseLike<T> => {
-  return Boolean(value) && typeof (value as any).then === 'function';
-};
+import { createLoggerFromConfig } from '../runtime/logger';
+import { initQueues } from '../queues';
+import { ReplayEngine } from '../runtime/ReplayEngine';
 
 /**
  * Job data for workflow execution
  */
 interface WorkflowJobData {
   workflowId: string;
-  args?: any[];
+  workflowName?: string;
+  args?: unknown[];
   isResume?: boolean;
+  timerId?: string;
 }
 
 /**
  * Start the workflow worker
  */
-export function startWorkflowWorker(): Worker {
-  const config = Durabull.getConfig();
+export function startWorkflowWorker(instance?: Durabull): Worker {
+  const durabullInstance = instance || Durabull.getActive();
+  if (!durabullInstance) {
+    throw new Error('Durabull instance not initialized. Call new Durabull(config) first or pass instance to startWorkflowWorker.');
+  }
+  const initialConfig = durabullInstance.getConfig();
   const storage = getStorage();
-  const logger = getLogger();
   
-  const connection = new Redis(config.redisUrl, {
+  // Initialize queues if not already initialized
+  initQueues(
+    initialConfig.redisUrl,
+    initialConfig.queues.workflow,
+    initialConfig.queues.activity
+  );
+  
+  const logger = createLoggerFromConfig(initialConfig.logger);
+  
+  const connection = new Redis(initialConfig.redisUrl, {
     maxRetriesPerRequest: null,
   });
 
   const worker = new Worker(
-    config.queues!.workflow!,
+    initialConfig.queues.workflow,
     async (job: Job<WorkflowJobData>) => {
-      const { workflowId, args = [], isResume = false } = job.data;
+      const config = durabullInstance.getConfig();
+      const { workflowId, workflowName, isResume = false, timerId } = job.data;
 
-  logger.info(`[WorkflowWorker] Processing workflow ${workflowId} (resume: ${isResume})`);
+      logger.info(`[WorkflowWorker] Processing workflow ${workflowId} (${workflowName || 'unknown'}) (resume: ${isResume})`);
 
-      // Acquire lock to prevent concurrent execution
       const lockAcquired = await storage.acquireLock(workflowId, 'workflow', 300);
       if (!lockAcquired) {
-  logger.debug(`[WorkflowWorker] Workflow ${workflowId} is already running, skipping`);
+        logger.debug(`[WorkflowWorker] Workflow ${workflowId} is already running, skipping`);
         return;
       }
 
-      let record: WorkflowRecord | null = null;
-      let signalCursor: Record<string, number> = {};
-      let signalCursorDirty = false;
-
-      const persistSignalCursor = async () => {
-        if (!signalCursorDirty) {
-          return;
-        }
-
-        const latestRecord = await storage.readRecord(workflowId);
-        if (!latestRecord) {
-          return;
-        }
-
-        latestRecord.signalCursor = { ...signalCursor };
-        latestRecord.updatedAt = Date.now();
-        await storage.writeRecord(latestRecord);
-        record = latestRecord;
-        signalCursorDirty = false;
-      };
+      if (isResume && timerId) {
+        await storage.appendEvent(workflowId, {
+          type: 'timer-fired',
+          id: timerId,
+          ts: Date.now(),
+        });
+      }
 
       try {
-        record = await storage.readRecord(workflowId);
+        let record = await storage.readRecord(workflowId);
         if (!record) {
           throw new Error(`Workflow ${workflowId} not found`);
         }
 
         const readHistory = async () =>
           (await storage.readHistory(workflowId)) || { events: [], cursor: 0 };
-        let history = await readHistory();
+        const history = await readHistory();
 
         if (record.status === 'completed' || record.status === 'failed') {
           logger.debug(`[WorkflowWorker] Workflow ${workflowId} already ${record.status}`);
           return;
         }
 
-        const WorkflowClass = resolveWorkflow(record.class);
+        const resolvedWorkflowName = workflowName || record.class;
+        const WorkflowClass = durabullInstance.resolveWorkflow(resolvedWorkflowName);
         if (!WorkflowClass) {
-          throw new Error(`Workflow class ${record.class} not registered`);
+          throw new Error(`Workflow "${resolvedWorkflowName}" not registered`);
         }
 
-        const effectiveArgs = args.length ? args : record.args ?? [];
         const previousWaiting = record.waiting ? { ...record.waiting } : undefined;
+
+        if (record.status === 'pending' && config.lifecycleHooks?.workflow?.onStart) {
+          try {
+            await config.lifecycleHooks.workflow.onStart(workflowId, resolvedWorkflowName, record.args || []);
+          } catch (hookError) {
+            logger.error('Workflow onStart hook failed', hookError);
+          }
+        }
 
         record.status = 'running';
         record.waiting = undefined;
@@ -126,174 +104,112 @@ export function startWorkflowWorker(): Worker {
         }
 
         const workflow = new WorkflowClass();
+        const signals = await storage.listSignals(workflowId);
 
-        WorkflowStub._setContext({
+        const replayResult = await ReplayEngine.run({
           workflowId,
           workflow,
           record,
+          history,
+          signals,
           isResume,
-          clockCursor: 0,
+          getHistory: readHistory,
+          onStep: async (cursor, updatedHistory) => {
+            await storage.writeHistory(workflowId, updatedHistory);
+          },
         });
 
-        const signalMethods = getSignalMethods(WorkflowClass);
-        signalCursor = { ...(record.signalCursor ?? {}) };
+        if (replayResult.signalCursor) {
+          const latestRecord = await storage.readRecord(workflowId);
+          if (latestRecord) {
+            latestRecord.signalCursor = replayResult.signalCursor;
+            latestRecord.updatedAt = Date.now();
+            await storage.writeRecord(latestRecord);
+            record = latestRecord;
+          }
+        }
 
-        const replaySignals = async (
-          index: number,
-          options: { initial: boolean; log?: HistoryEvent; nextLog?: HistoryEvent }
-        ): Promise<void> => {
-          if (signalMethods.length === 0) {
-            return;
+        if (replayResult.status === 'completed') {
+          record = (await storage.readRecord(workflowId)) ?? record;
+          if (!record) {
+            throw new Error(`Workflow ${workflowId} record missing during completion`);
           }
 
-          const signals = await storage.listSignals(workflowId);
-          if (!signals.length) {
-            return;
-          }
+          record.status = 'completed';
+          record.output = replayResult.result;
+          record.waiting = undefined;
+          record.updatedAt = Date.now();
+          await storage.writeRecord(record);
 
-          const sortedSignals = [...signals].sort((a, b) => a.ts - b.ts);
-          const key = index.toString();
-
-          if (!options.initial && !options.log) {
-            return;
-          }
-
-          let lowerBound = signalCursor[key] ?? Number.NEGATIVE_INFINITY;
-          if (options.log) {
-            lowerBound = Math.max(lowerBound, options.log.ts ?? Number.NEGATIVE_INFINITY);
-          }
-
-          const upperBound = options.nextLog ? options.nextLog.ts : Number.POSITIVE_INFINITY;
-
-          const toReplay = sortedSignals.filter(
-            (signal) => signal.ts > lowerBound && signal.ts <= upperBound
-          );
-
-          if (!toReplay.length) {
-            return;
-          }
-
-          for (const signal of toReplay) {
-            if (signalMethods.includes(signal.name)) {
-              const argsForSignal = Array.isArray(signal.payload)
-                ? signal.payload
-                : [signal.payload];
-              (workflow as any)[signal.name](...argsForSignal);
-            }
-          }
-
-          signalCursor[key] = toReplay[toReplay.length - 1].ts;
-          signalCursorDirty = true;
-        };
-
-        let currentIndex = history.cursor ?? 0;
-
-        const getLogsForIndex = async (
-          index: number
-        ): Promise<{ log?: HistoryEvent; nextLog?: HistoryEvent }> => {
-          history = await readHistory();
-          return {
-            log: history.events[index],
-            nextLog: history.events[index + 1],
-          };
-        };
-
-        const initialLogs = await getLogsForIndex(currentIndex);
-        await replaySignals(currentIndex, { initial: true, ...initialLogs });
-
-        const generator = workflow.execute(...effectiveArgs);
-
-        let result = await generator.next();
-
-        while (!result.done) {
-          const { log, nextLog } = await getLogsForIndex(currentIndex);
-          await replaySignals(currentIndex, { initial: false, log, nextLog });
-
-          if (isPromiseLike(result.value)) {
+          if (config.lifecycleHooks?.workflow?.onComplete) {
             try {
-              const resolved = await result.value;
-
-              currentIndex += 1;
-              history.cursor = currentIndex;
-              await storage.writeHistory(workflowId, history);
-
-              result = await generator.next(resolved);
-            } catch (error) {
-              if (error instanceof WorkflowContinueAsNewError) {
-                await persistSignalCursor();
-                logger.info(
-                  `[WorkflowWorker] Workflow ${workflowId} continued as new -> ${error.workflowId}`
-                );
-                return;
-              }
-
-              if (error instanceof WorkflowWaitError) {
-                await persistSignalCursor();
-                logger.debug(`[WorkflowWorker] Workflow ${workflowId} waiting`);
-                return;
-              }
-
-              result = await generator.throw(error);
+              await config.lifecycleHooks.workflow.onComplete(workflowId, resolvedWorkflowName, replayResult.result);
+            } catch (hookError) {
+              logger.error('Workflow onComplete hook failed', hookError);
             }
-          } else {
-            currentIndex += 1;
-            history.cursor = currentIndex;
-            await storage.writeHistory(workflowId, history);
-
-            result = await generator.next(result.value);
           }
-        }
 
-        await persistSignalCursor();
+          logger.info(`[WorkflowWorker] Workflow ${workflowId} completed`);
 
-        record = (await storage.readRecord(workflowId)) ?? record;
-        if (!record) {
-          throw new Error(`Workflow ${workflowId} record missing during completion`);
-        }
+        } else if (replayResult.status === 'failed') {
+          const failedRecord = await storage.readRecord(workflowId);
+          if (failedRecord) {
+            failedRecord.status = 'failed';
+            failedRecord.error = {
+              message: (replayResult.error as Error).message,
+              stack: (replayResult.error as Error).stack,
+            };
+            failedRecord.waiting = undefined;
+            failedRecord.updatedAt = Date.now();
+            await storage.writeRecord(failedRecord);
+            
+            if (config.lifecycleHooks?.workflow?.onFailed) {
+              try {
+                await config.lifecycleHooks.workflow.onFailed(workflowId, resolvedWorkflowName, replayResult.error as Error);
+              } catch (hookError) {
+                logger.error('Workflow onFailed hook failed', hookError);
+              }
+            }
+          }
+          logger.error(`[WorkflowWorker] Workflow ${workflowId} failed`, replayResult.error);
+          throw replayResult.error;
 
-        record.status = 'completed';
-        record.output = result.value;
-        record.waiting = undefined;
-        record.signalCursor = { ...signalCursor };
-        record.updatedAt = Date.now();
-        await storage.writeRecord(record);
+        } else if (replayResult.status === 'waiting') {
+          const waitingRecord = await storage.readRecord(workflowId);
+          if (waitingRecord) {
+            waitingRecord.status = 'waiting';
+            waitingRecord.updatedAt = Date.now();
+            await storage.writeRecord(waitingRecord);
+          }
 
-  logger.info(`[WorkflowWorker] Workflow ${workflowId} completed`);
-      } catch (error) {
-        if (error instanceof WorkflowContinueAsNewError) {
-          await persistSignalCursor();
-          logger.info(
-            `[WorkflowWorker] Workflow ${workflowId} continued as new -> ${error.workflowId}`
-          );
-          return;
-        }
-
-        if (error instanceof WorkflowWaitError) {
-          await persistSignalCursor();
+          if (config.lifecycleHooks?.workflow?.onWaiting) {
+            try {
+              await config.lifecycleHooks.workflow.onWaiting(workflowId, resolvedWorkflowName);
+            } catch (hookError) {
+              logger.error('Workflow onWaiting hook failed', hookError);
+            }
+          }
+          
           logger.debug(`[WorkflowWorker] Workflow ${workflowId} waiting`);
-          return;
+
+        } else if (replayResult.status === 'continued') {
+          if (config.lifecycleHooks?.workflow?.onContinued) {
+            try {
+              await config.lifecycleHooks.workflow.onContinued(workflowId, resolvedWorkflowName, replayResult.newWorkflowId!);
+            } catch (hookError) {
+              logger.error('Workflow onContinued hook failed', hookError);
+            }
+          }
+          
+          logger.info(
+            `[WorkflowWorker] Workflow ${workflowId} continued as new -> ${replayResult.newWorkflowId}`
+          );
         }
 
-        await persistSignalCursor();
-
-        const failedRecord = await storage.readRecord(workflowId);
-        if (failedRecord) {
-          failedRecord.status = 'failed';
-          failedRecord.error = {
-            message: (error as Error).message,
-            stack: (error as Error).stack,
-          };
-          failedRecord.waiting = undefined;
-          failedRecord.updatedAt = Date.now();
-          await storage.writeRecord(failedRecord);
-        }
-
-  logger.error(`[WorkflowWorker] Workflow ${workflowId} failed`, error);
+      } catch (error) {
+        logger.error(`[WorkflowWorker] Unexpected error in workflow ${workflowId}`, error);
         throw error;
       } finally {
-        await persistSignalCursor();
-        WorkflowStub._setContext(null);
-        // Release lock
         await storage.releaseLock(workflowId, 'workflow');
       }
     },
@@ -306,6 +222,11 @@ export function startWorkflowWorker(): Worker {
 
   worker.on('failed', (job: Job | undefined, err: Error) => {
     logger.error(`[WorkflowWorker] Job ${job?.id} failed`, err);
+  });
+
+  worker.on('closed', async () => {
+    await connection.quit();
+    logger.info('[WorkflowWorker] Connection closed');
   });
 
   logger.info('[WorkflowWorker] Started');

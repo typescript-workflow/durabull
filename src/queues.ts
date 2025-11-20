@@ -3,8 +3,8 @@
  */
 
 import { Queue, QueueEvents } from 'bullmq';
-import { Durabull } from './config/global';
 import { Redis } from 'ioredis';
+import { Durabull } from './config/global';
 
 /**
  * Queue instances
@@ -14,26 +14,58 @@ interface Queues {
   activity: Queue;
   workflowEvents: QueueEvents;
   activityEvents: QueueEvents;
+  connection: Redis;
 }
 
 let queues: Queues | null = null;
 
 /**
- * Get or create queue instances
+ * Initialize queues with explicit configuration
+ */
+export function initQueues(redisUrl: string, workflowQueue: string, activityQueue: string): Queues {
+  if (queues) {
+    // If already initialized, check if config matches.
+    // If it does, return existing. If not, throw error to prevent leaks/confusion.
+    // Note: We can't easily check redisUrl equality due to potential formatting differences,
+    // but we can check queue names.
+    if (queues.workflow.name === workflowQueue && queues.activity.name === activityQueue) {
+      return queues;
+    }
+    throw new Error('Queues already initialized with different configuration. Call closeQueues() first.');
+  }
+
+  const connection = new Redis(redisUrl, {
+    maxRetriesPerRequest: null,
+  });
+
+  queues = {
+    workflow: new Queue(workflowQueue, { connection }),
+    activity: new Queue(activityQueue, { connection }),
+    workflowEvents: new QueueEvents(workflowQueue, { connection }),
+    activityEvents: new QueueEvents(activityQueue, { connection }),
+    connection,
+  };
+  
+  return queues;
+}
+
+/**
+ * Get queue instances (must call initQueues first in durable mode)
  */
 export function getQueues(): Queues {
   if (!queues) {
-    const config = Durabull.getConfig();
-    const connection = new Redis(config.redisUrl, {
-      maxRetriesPerRequest: null,
-    });
-
-    queues = {
-      workflow: new Queue(config.queues!.workflow!, { connection: connection.duplicate() }),
-      activity: new Queue(config.queues!.activity!, { connection: connection.duplicate() }),
-      workflowEvents: new QueueEvents(config.queues!.workflow!, { connection: connection.duplicate() }),
-      activityEvents: new QueueEvents(config.queues!.activity!, { connection: connection.duplicate() }),
-    };
+    const instance = Durabull.getActive();
+    
+    if (instance) {
+      const config = instance.getConfig();
+      return initQueues(
+        config.redisUrl,
+        config.queues.workflow,
+        config.queues.activity
+      );
+    }
+    
+    throw new Error('Durabull instance not initialized. Call new Durabull(config) first.');
   }
   return queues;
 }
@@ -47,6 +79,7 @@ export async function closeQueues(): Promise<void> {
     await queues.activity.close();
     await queues.workflowEvents.close();
     await queues.activityEvents.close();
+    await queues.connection.quit();
     queues = null;
   }
 }
