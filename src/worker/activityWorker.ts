@@ -126,8 +126,24 @@ export function startActivityWorker(instance?: Durabull): Worker {
           let result: unknown;
           
           if (activity.timeout && activity.timeout > 0) {
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            result = await (activity as any)._executeWithTimeout(activity.timeout * 1000, ...args);
+            const timeoutMs = activity.timeout * 1000;
+            let timerId: NodeJS.Timeout;
+
+            const timeoutPromise = new Promise<never>((_, reject) => {
+              timerId = setTimeout(() => {
+                abortController.abort();
+                reject(new Error(`Activity timeout after ${timeoutMs}ms`));
+              }, timeoutMs);
+            });
+
+            try {
+              result = await Promise.race([
+                activity.execute(...args),
+                timeoutPromise
+              ]);
+            } finally {
+              if (timerId!) clearTimeout(timerId);
+            }
           } else {
             result = await activity.execute(...args);
           }
