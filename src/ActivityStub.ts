@@ -120,6 +120,7 @@ export class ActivityStub {
         );
         
         if (existingEvent && existingEvent.type === 'activity') {
+          // Activity already completed during previous execution - return cached result
           if (existingEvent.error) {
             throw new Error(existingEvent.error.message || 'Activity failed');
           }
@@ -127,6 +128,7 @@ export class ActivityStub {
         }
       }
 
+      // Activity not in history - need to queue it
       // Build retry options from activity metadata and per-invocation overrides
       const retryOptions: { tries?: number; timeout?: number; backoff?: number[] } = {};
       
@@ -143,6 +145,7 @@ export class ActivityStub {
       const attempts = (tries === 0) ? Number.MAX_SAFE_INTEGER : (tries || 1);
       
       // Queue the activity job (only on first execution, not replay)
+      // Use activityId as BullMQ jobId to prevent duplicate jobs
       await queues.activity.add('execute', {
         workflowId,
         activityClass: finalActivityName,
@@ -150,6 +153,7 @@ export class ActivityStub {
         args: finalArgs,
         retryOptions: Object.keys(retryOptions).length > 0 ? retryOptions : undefined,
       }, {
+        jobId: `${workflowId}:${activityId}`,  // Ensures uniqueness per workflow
         attempts,
         backoff: {
             type: 'custom', // We use the custom strategy defined in worker
