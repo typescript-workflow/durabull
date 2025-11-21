@@ -8,8 +8,8 @@ import { Workflow } from '../../src/Workflow';
 import { Activity } from '../../src/Activity';
 import { ActivityStub } from '../../src/ActivityStub';
 import { Durabull } from '../../src/config/global';
-import { initQueues, getQueues } from '../../src/queues';
-import { RedisStorage, setStorage } from '../../src/runtime/storage';
+import { initQueues, getQueues, closeQueues } from '../../src/queues';
+import { RedisStorage, setStorage, closeStorage } from '../../src/runtime/storage';
 
 jest.setTimeout(10000);
 
@@ -65,6 +65,11 @@ describe('Cursor Persistence Fix', () => {
     const config = durabull.getConfig();
     await initQueues(config.redisUrl, config.queues.workflow, config.queues.activity);
     setStorage(new RedisStorage(config.redisUrl));
+  });
+
+  afterAll(async () => {
+    await closeQueues();
+    await closeStorage();
   });
 
   beforeEach(() => {
