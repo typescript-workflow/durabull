@@ -89,6 +89,10 @@ export class ActivityStub {
       }
     }
 
+    // Generate activity ID synchronously to ensure deterministic ordering
+    // This must happen before the async function executes to capture the correct activityCursor
+    const activityId = options?.activityId || WorkflowStub._generateActivityId();
+
     // Queue activity and return promise that will be resolved by workflow worker via history replay
     const promise = (async () => {
       const workflowContext = WorkflowStub._getContext();
@@ -98,7 +102,6 @@ export class ActivityStub {
 
       const queues = getQueues();
       const storage = getStorage();
-      const activityId = options?.activityId || WorkflowStub._generateActivityId();
       const workflowId = workflowContext.workflowId;
       const history = await storage.readHistory(workflowId);
 
