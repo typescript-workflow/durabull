@@ -4,7 +4,6 @@
 
 import { Activity } from './Activity';
 import { getQueues } from './queues';
-import { getStorage } from './runtime/storage';
 import { WorkflowStub, WorkflowWaitError } from './WorkflowStub';
 
 type AnyActivity = Activity<unknown[], unknown>;
@@ -92,6 +91,13 @@ export class ActivityStub {
     // Generate activity ID synchronously to ensure deterministic ordering
     // This must happen before the async function executes to capture the correct activityCursor
     const activityId = options?.activityId || WorkflowStub._generateActivityId();
+    
+    // CRITICAL FIX: Ensure immutable capture of activity metadata before async execution
+    // These const declarations create a proper closure that cannot be modified by subsequent calls
+    const finalActivityName = activityName;
+    const finalArgs = Array.isArray(args) ? [...args] : args;
+    const finalDefaultTries = defaultTries;
+    const finalDefaultBackoff = defaultBackoff;
 
     // Queue activity and return promise that will be resolved by workflow worker via history replay
     const promise = (async () => {
@@ -101,9 +107,11 @@ export class ActivityStub {
       }
 
       const queues = getQueues();
-      const storage = getStorage();
       const workflowId = workflowContext.workflowId;
-      const history = await storage.readHistory(workflowId);
+      
+      // CRITICAL FIX: Use history from context instead of reading from storage
+      // This ensures we're checking against the same history that ReplayEngine is using
+      const history = workflowContext.history;
 
       // Check if this activity already completed (replay)
       if (history) {
@@ -122,12 +130,12 @@ export class ActivityStub {
       // Build retry options from activity metadata and per-invocation overrides
       const retryOptions: { tries?: number; timeout?: number; backoff?: number[] } = {};
       
-      const tries = options?.tries ?? defaultTries;
+      const tries = options?.tries ?? finalDefaultTries;
       if (tries !== undefined) retryOptions.tries = tries;
       
       if (options?.timeout !== undefined) retryOptions.timeout = options.timeout;
       
-      const backoff = options?.backoff ?? defaultBackoff;
+      const backoff = options?.backoff ?? finalDefaultBackoff;
       if (backoff) retryOptions.backoff = backoff;
 
       // Map to BullMQ options
@@ -137,9 +145,9 @@ export class ActivityStub {
       // Queue the activity job (only on first execution, not replay)
       await queues.activity.add('execute', {
         workflowId,
-        activityClass: activityName,
+        activityClass: finalActivityName,
         activityId,
-        args,
+        args: finalArgs,
         retryOptions: Object.keys(retryOptions).length > 0 ? retryOptions : undefined,
       }, {
         attempts,
