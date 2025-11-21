@@ -4,7 +4,6 @@
 
 import { Activity } from './Activity';
 import { getQueues } from './queues';
-import { getStorage } from './runtime/storage';
 import { WorkflowStub, WorkflowWaitError } from './WorkflowStub';
 
 type AnyActivity = Activity<unknown[], unknown>;
@@ -108,7 +107,6 @@ export class ActivityStub {
       }
 
       const queues = getQueues();
-      const storage = getStorage();
       const workflowId = workflowContext.workflowId;
       
       // CRITICAL FIX: Use history from context instead of reading from storage
