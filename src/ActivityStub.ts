@@ -67,14 +67,12 @@ export class ActivityStub {
       args = argsWithOptions as ActivityArgs<T>;
     }
 
-    let activityName: string;
+    // CRITICAL FIX: Capture activity name and defaults immediately as const
+    // DO NOT use intermediate let variables - they get overwritten in rapid generator calls
     let defaultTries: number | undefined;
     let defaultBackoff: number[] | undefined;
 
-    if (typeof activityClassOrName === 'string') {
-      activityName = activityClassOrName;
-    } else {
-      activityName = activityClassOrName.name;
+    if (typeof activityClassOrName !== 'string') {
       try {
         const instance = new activityClassOrName();
         defaultTries = instance.tries;
@@ -92,9 +90,11 @@ export class ActivityStub {
     // This must happen before the async function executes to capture the correct activityCursor
     const activityId = options?.activityId || WorkflowStub._generateActivityId();
     
-    // CRITICAL FIX: Ensure immutable capture of activity metadata before async execution
-    // These const declarations create a proper closure that cannot be modified by subsequent calls
-    const finalActivityName = activityName;
+    // CRITICAL FIX: Capture values immediately as const to prevent closure bugs
+    // Each call to make() must capture its own immutable values before any async boundary
+    const finalActivityName = typeof activityClassOrName === 'string' 
+      ? activityClassOrName 
+      : activityClassOrName.name;
     const finalArgs = Array.isArray(args) ? [...args] : args;
     const finalDefaultTries = defaultTries;
     const finalDefaultBackoff = defaultBackoff;
