@@ -153,7 +153,7 @@ export class ActivityStub {
         args: finalArgs,
         retryOptions: Object.keys(retryOptions).length > 0 ? retryOptions : undefined,
       }, {
-        jobId: `${workflowId}:${activityId}`,  // Ensures uniqueness per workflow
+        jobId: `${workflowId}-${activityId}`,  // Ensures uniqueness per workflow
         attempts,
         backoff: {
             type: 'custom', // We use the custom strategy defined in worker

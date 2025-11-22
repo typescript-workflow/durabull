@@ -1,6 +1,6 @@
 {
   "name": "durabull",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "A durable workflow engine built on top of BullMQ and Redis",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
