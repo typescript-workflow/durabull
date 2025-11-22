@@ -42,7 +42,7 @@ export class ReplayEngine {
       clockCursor: 0,
       timerCursor: 0,
       sideEffectCursor: 0,
-      activityCursor: history.events.filter(e => e.type === 'activity').length,
+      activityCursor: 0,
       childWorkflowCursor: 0,
     };
 
