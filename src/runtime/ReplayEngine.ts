@@ -98,6 +98,8 @@ export class ReplayEngine {
     ): Promise<{ log?: HistoryEvent; nextLog?: HistoryEvent }> => {
       if (options.getHistory) {
           history = await options.getHistory();
+          // CRITICAL: Update context.history so ActivityStub checks against latest history
+          context.history = history;
       }
       return {
         log: history.events[index],
